@@ -1,0 +1,19 @@
+# BTN Bot - WhatsApp Interactive Buttons Bot
+
+# API
+fastapi
+uvicorn[standard]
+python-dotenv
+httpx
+
+# Data
+google-cloud-bigquery
+
+# Streamlit (para testing)
+streamlit
+
+# Tests
+pytest
+
+# Vertex AI (mantenido por compatibilidad con BigQuery)
+google-cloud-aiplatform

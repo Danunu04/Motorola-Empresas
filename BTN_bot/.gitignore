@@ -1,0 +1,12 @@
+# Secrets
+.env
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Data / logs (ephemeral in Cloud Run)
+logs/
+data/user_names.json
