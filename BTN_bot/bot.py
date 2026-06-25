@@ -18,6 +18,10 @@ Endpoints:
 - GET  /handoff/sessions - Get handoff sessions
 - POST /resume      - Resume bot after handoff
 - GET  /flow/states - Get registered flow states
+- GET  /chatlog/download - Descarga de conversaciones por rango de fechas (csv/json/pdf)
+- GET  /messages    - Listar mensajes editables del bot
+- PUT  /messages/{message_key} - Actualizar el contenido de un mensaje editable
+- POST /messages/{message_key}/reset - Restaurar un mensaje editable a su valor por defecto
 """
 
 import os
@@ -25,21 +29,23 @@ import httpx
 import json
 import re
 import csv
+import io
 import time
 import asyncio
 import uuid
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from fastapi.responses import FileResponse
 from typing import Any, Dict, List, Optional
 from threading import Lock
 from pathlib import Path
 from starlette.concurrency import run_in_threadpool
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
+import message_store
 from flow_states_btn import (
     FlowController,
     FlowContext,
@@ -372,6 +378,91 @@ def _read_chat_log_bigquery(limit: int = 500) -> List[Dict[str, Any]]:
     return logs
 
 
+CHATLOG_COLUMNS = [
+    "turn_id", "timestamp", "session_id", "channel", "environment", "status", "question", "answer",
+]
+
+
+def _parse_date_param(value: str, name: str) -> date:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"'{name}' debe tener formato YYYY-MM-DD")
+
+
+def _filter_chat_log_by_range(logs: List[Dict[str, Any]], start: date, end: date) -> List[Dict[str, Any]]:
+    result = []
+    for record in logs:
+        timestamp = record.get("timestamp")
+        if not timestamp:
+            continue
+        try:
+            record_date = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00")).date()
+        except ValueError:
+            continue
+        if start <= record_date <= end:
+            result.append(record)
+    return result
+
+
+def _read_chat_log_bigquery_range(start: date, end: date) -> List[Dict[str, Any]]:
+    client = _get_bigquery_client()
+    query = f"""
+        SELECT timestamp, session_id, question, answer, channel, environment
+        FROM `{_get_bigquery_table_id()}`
+        WHERE DATE(timestamp) BETWEEN @start AND @end
+        ORDER BY timestamp ASC
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("start", "DATE", start),
+            bigquery.ScalarQueryParameter("end", "DATE", end),
+        ]
+    )
+    rows = client.query(query, job_config=job_config).result()
+    logs = []
+    for row in rows:
+        logs.append(
+            _normalize_chat_log_record(
+                {
+                    "timestamp": row["timestamp"].isoformat() if row["timestamp"] else None,
+                    "session_id": row["session_id"],
+                    "question": row["question"],
+                    "answer": row["answer"],
+                    "channel": row["channel"],
+                    "environment": row["environment"],
+                }
+            )
+        )
+    return logs
+
+
+def _build_chatlog_pdf(logs: List[Dict[str, Any]], start: date, end: date) -> bytes:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4))
+    styles = getSampleStyleSheet()
+
+    header = Paragraph(f"Conversaciones {start.isoformat()} a {end.isoformat()}", styles["Title"])
+    data = [CHATLOG_COLUMNS] + [
+        [str(record.get(col, ""))[:200] for col in CHATLOG_COLUMNS] for record in logs
+    ]
+    table = Table(data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#003a70")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTSIZE", (0, 0), (-1, -1), 6),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+    ]))
+
+    doc.build([header, Spacer(1, 12), table])
+    return buf.getvalue()
+
+
 def _append_chat_log(session_id: str, question: str, answer: str) -> None:
     record = _normalize_chat_log_record({
         "turn_id": str(uuid.uuid4()),
@@ -541,6 +632,15 @@ class ChatResponse(BaseModel):
 
 class ResetRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
+
+
+class MessageUpdateRequest(BaseModel):
+    content: str
+    updated_by: str = ""
+
+
+class MessageResetBody(BaseModel):
+    updated_by: str = ""
 
 
 # ==============================
@@ -1015,6 +1115,114 @@ def get_chat_log():
     )
 
 
+@app.get("/chatlog/download")
+def download_chat_log(
+    from_: Optional[str] = Query(None, alias="from"),
+    to: Optional[str] = Query(None),
+    format: str = Query("csv"),
+):
+    if not from_ or not to:
+        raise HTTPException(status_code=422, detail="Los parámetros 'from' y 'to' son obligatorios")
+
+    start = _parse_date_param(from_, "from")
+    end = _parse_date_param(to, "to")
+
+    if start > end:
+        raise HTTPException(status_code=400, detail="'from' no puede ser posterior a 'to'")
+
+    if (end - start).days > 89:
+        raise HTTPException(status_code=400, detail="El rango máximo permitido es de 90 días")
+
+    fmt = format.lower()
+    if fmt not in {"csv", "json", "pdf"}:
+        raise HTTPException(status_code=422, detail="'format' debe ser csv, json o pdf")
+
+    if _should_use_bigquery_chat_log():
+        try:
+            logs = _read_chat_log_bigquery_range(start, end)
+        except (RuntimeError, Exception) as e:
+            raise HTTPException(status_code=503, detail=f"No se pudo leer chatlog desde BigQuery: {e}")
+    else:
+        logs = _filter_chat_log_by_range(_load_chat_log(), start, end)
+
+    if not logs:
+        raise HTTPException(status_code=404, detail="No hay conversaciones en el rango solicitado")
+
+    filename_base = f"chatlog_{start.isoformat()}_{end.isoformat()}"
+
+    if fmt == "json":
+        payload = [{col: record.get(col) for col in CHATLOG_COLUMNS} for record in logs]
+        return JSONResponse(
+            content=payload,
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.json"'},
+        )
+
+    if fmt == "csv":
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=CHATLOG_COLUMNS)
+        writer.writeheader()
+        for record in logs:
+            writer.writerow({col: record.get(col, "") for col in CHATLOG_COLUMNS})
+        return Response(
+            content=buf.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.csv"'},
+        )
+
+    pdf_bytes = _build_chatlog_pdf(logs, start, end)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename_base}.pdf"'},
+    )
+
+
+@app.get("/messages")
+def list_messages():
+    return {"ok": True, "messages": message_store.get_all_messages_with_metadata()}
+
+
+@app.put("/messages/{message_key}")
+def update_message(message_key: str, req: MessageUpdateRequest):
+    meta = message_store.get_message_metadata(message_key)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="message_key no registrada")
+
+    content = req.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="content vacío")
+
+    limit = message_store.MESSAGE_LIMITS.get(meta["message_type"])
+    if limit and len(content) > limit:
+        raise HTTPException(
+            status_code=422,
+            detail=f"content excede el límite de {limit} caracteres para {meta['message_type']}",
+        )
+
+    try:
+        message_store.set_message(message_key, content, req.updated_by)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"BigQuery no disponible para guardar cambios: {e}")
+
+    logger.info(f"[messages] {message_key} actualizado por {req.updated_by}")
+    return {"ok": True, "message_key": message_key}
+
+
+@app.post("/messages/{message_key}/reset")
+def reset_message(message_key: str, req: MessageResetBody):
+    meta = message_store.get_message_metadata(message_key)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="message_key no registrada")
+
+    try:
+        message_store.set_message(message_key, meta["default_content"], req.updated_by)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"BigQuery no disponible para guardar cambios: {e}")
+
+    logger.info(f"[messages] {message_key} restaurado a default por {req.updated_by}")
+    return {"ok": True, "message_key": message_key}
+
+
 class AgentSendRequest(BaseModel):
     session_id: str
     message: Optional[str] = None
@@ -1087,6 +1295,8 @@ async def startup():
 
     FLOW_CONTROLLER = FlowController(FLOW_SPEC, COMPANY_DOMAIN_TO_CODE)
     logger.info(f"[startup] FlowController inicializado con {len(StateFactory.get_registered_states())} estados")
+
+    message_store.load_all_messages()
 
 
 # ==============================
