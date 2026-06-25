@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+import message_store
+
 
 EMAIL_RE = re.compile(r"[\w\.\-\+]+@[\w\.\-]+\.\w+", re.I)
 GENERIC_MAIL_RE = re.compile(r"@(gmail|hotmail|outlook|live|yahoo)\.", re.I)
@@ -490,22 +492,38 @@ class EstadoInicial(FlowState):
     """Menú principal con List Message (4 opciones, >3 botones)."""
 
     def prompt(self, context: FlowContext) -> str:
-        return WELCOME_MESSAGE
+        return message_store.get_message("welcome_message", default=WELCOME_MESSAGE)
 
     def get_interactive_type(self, context: FlowContext) -> str:
         return "list"
 
     def get_list_config(self, context: FlowContext) -> Optional[Dict[str, Any]]:
         return {
-            "button_text": "Ver opciones",
+            "button_text": message_store.get_message("main_menu_button_text", default="Ver opciones"),
             "sections": [
                 {
                     "title": "¿En qué te puedo ayudar?",
                     "rows": [
-                        ListRow("registro", "No me puedo registrar", "Problemas con el registro"),
-                        ListRow("no_veo_precios", "No veo precios", "No se muestran los precios"),
-                        ListRow("no_veo_descuentos", "No veo descuentos", "Descuentos no aplicados"),
-                        ListRow("info_pedido", "Info de mi pedido", "Consultar estado del pedido"),
+                        ListRow(
+                            "registro",
+                            message_store.get_message("main_menu_row_registro_title", default="No me puedo registrar"),
+                            message_store.get_message("main_menu_row_registro_description", default="Problemas con el registro"),
+                        ),
+                        ListRow(
+                            "no_veo_precios",
+                            message_store.get_message("main_menu_row_no_veo_precios_title", default="No veo precios"),
+                            message_store.get_message("main_menu_row_no_veo_precios_description", default="No se muestran los precios"),
+                        ),
+                        ListRow(
+                            "no_veo_descuentos",
+                            message_store.get_message("main_menu_row_no_veo_descuentos_title", default="No veo descuentos"),
+                            message_store.get_message("main_menu_row_no_veo_descuentos_description", default="Descuentos no aplicados"),
+                        ),
+                        ListRow(
+                            "info_pedido",
+                            message_store.get_message("main_menu_row_info_pedido_title", default="Info de mi pedido"),
+                            message_store.get_message("main_menu_row_info_pedido_description", default="Consultar estado del pedido"),
+                        ),
                     ]
                 }
             ]
@@ -553,7 +571,7 @@ class EstadoInicial(FlowState):
 
         return self.response(
             context,
-            WELCOME_MESSAGE,
+            message_store.get_message("welcome_message", default=WELCOME_MESSAGE),
             sentiment=sentiment,
         )
 
@@ -574,7 +592,7 @@ class EstadoPreFlujo(FlowState):
     """Pantalla intermedia que muestra el mensaje de empatía antes de derivar al flujo."""
 
     def prompt(self, context: FlowContext) -> str:
-        return PRE_FLUJO_MESSAGE
+        return message_store.get_message("pre_flujo_message", default=PRE_FLUJO_MESSAGE)
 
     def get_buttons(self, context: FlowContext) -> List[Button]:
         return [Button("continuar", "CONTINUAR")]
@@ -796,7 +814,7 @@ class EstadoInfoPedido(FlowState):
                 return _set_state_and_reply(
                     context,
                     "EstadoInicial",
-                    WELCOME_MESSAGE,
+                    message_store.get_message("welcome_message", default=WELCOME_MESSAGE),
                     sentiment=sentiment,
                 )
             elif button_id == "no":
@@ -813,7 +831,7 @@ class EstadoInfoPedido(FlowState):
             return _set_state_and_reply(
                 context,
                 "EstadoInicial",
-                WELCOME_MESSAGE,
+                message_store.get_message("welcome_message", default=WELCOME_MESSAGE),
                 sentiment=sentiment,
             )
         if answer is False:
@@ -1124,7 +1142,7 @@ class EstadoConsultaAdicional(FlowState):
                 return _set_state_and_reply(
                     context,
                     "EstadoInicial",
-                    WELCOME_MESSAGE,
+                    message_store.get_message("welcome_message", default=WELCOME_MESSAGE),
                     sentiment=sentiment,
                 )
 
@@ -1142,7 +1160,7 @@ class EstadoConsultaAdicional(FlowState):
             return _set_state_and_reply(
                 context,
                 "EstadoInicial",
-                WELCOME_MESSAGE,
+                message_store.get_message("welcome_message", default=WELCOME_MESSAGE),
                 sentiment=sentiment,
             )
 
@@ -1168,7 +1186,7 @@ class EstadoFinalizado(FlowState):
                 return _set_state_and_reply(
                     context,
                     "EstadoInicial",
-                    WELCOME_MESSAGE,
+                    message_store.get_message("welcome_message", default=WELCOME_MESSAGE),
                     sentiment=sentiment,
                 )
 
@@ -1536,7 +1554,7 @@ class EstadoSoporte(FlowState):
                 return _set_state_and_reply(
                     context,
                     "EstadoInicial",
-                    WELCOME_MESSAGE,
+                    message_store.get_message("welcome_message", default=WELCOME_MESSAGE),
                     sentiment=sentiment,
                 )
 
