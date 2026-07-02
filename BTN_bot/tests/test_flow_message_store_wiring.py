@@ -137,6 +137,52 @@ class TestEditedValueIsUsed:
         assert result["reply"] == edited
 
 
+    def test_generic_yes_button_uses_edited_value(self, monkeypatch):
+        _patch_message(monkeypatch, "generic_yes_button", "Sí editado")
+
+        controller = _build_controller()
+        sid = "edited-yes-btn"
+        _send(controller, sid, "hola")
+        _send(controller, sid, "button_info_pedido")
+        result = _send(controller, sid, "button_continuar")
+        buttons = {btn["reply"]["id"]: btn["reply"]["title"] for btn in result["buttons"]}
+        assert buttons["si"] == "Sí editado"
+
+    def test_generic_si_loaded_button_uses_edited_value(self, monkeypatch):
+        _patch_message(monkeypatch, "generic_si_loaded_button", "Sí cargué editado")
+
+        controller = _build_controller()
+        sid = "edited-si-loaded-btn"
+        _send(controller, sid, "hola")
+        _send(controller, sid, "button_no_veo_descuentos")
+        result = _send(controller, sid, "button_continuar")
+        buttons = {btn["reply"]["id"]: btn["reply"]["title"] for btn in result["buttons"]}
+        assert buttons["si"] == "Sí cargué editado"
+
+    def test_ask_loaded_form_text_uses_edited_value(self, monkeypatch):
+        edited = "Contame si cargaste el formulario. [EDITADO]"
+        _patch_message(monkeypatch, "ask_loaded_form_text", edited)
+
+        controller = _build_controller()
+        sid = "edited-ask-loaded"
+        _send(controller, sid, "hola")
+        _send(controller, sid, "button_no_veo_descuentos")
+        _send(controller, sid, "button_continuar")
+        result = _send(controller, sid, "tal vez")
+        assert result["reply"] == edited
+
+    def test_registro_intro_text_uses_edited_value(self, monkeypatch):
+        edited = "Intro registro editada."
+        _patch_message(monkeypatch, "registro_intro_text", edited)
+
+        controller = _build_controller()
+        sid = "edited-registro-intro"
+        _send(controller, sid, "hola")
+        _send(controller, sid, "button_registro")
+        result = _send(controller, sid, "button_continuar")
+        assert result["reply"] == edited
+
+
 class TestConstantsPreservedAsFallback:
     """Las constantes originales no se eliminan: siguen siendo el default explícito."""
 

@@ -38,15 +38,20 @@ class TestLoadAllMessages:
 
 
 class TestGetAllMessagesWithMetadata:
-    def test_sorted_with_global_constants_first_then_by_key(self):
+    def test_sorted_with_global_constants_first_then_by_state_and_order(self):
         items = message_store.get_all_messages_with_metadata()
-        actual = [(item["state_name"], item["message_key"]) for item in items]
-        expected = sorted(actual, key=lambda pair: (pair[0] is not None, pair[0] or "", pair[1]))
-        assert actual == expected
-
-        state_names = [pair[0] for pair in actual]
+        state_names = [item["state_name"] for item in items]
         first_non_null = next(i for i, s in enumerate(state_names) if s is not None)
         assert all(s is None for s in state_names[:first_non_null])
+
+        # Within each state, orden should be non-decreasing.
+        by_state: dict = {}
+        for item in items:
+            by_state.setdefault(item["state_name"], []).append(item)
+        for state, state_items in by_state.items():
+            ordens = [item.get("orden") for item in state_items]
+            assert all(o is not None for o in ordens)
+            assert ordens == sorted(ordens)
 
     def test_every_entry_tagged_default_without_bigquery(self):
         items = message_store.get_all_messages_with_metadata()
@@ -70,6 +75,52 @@ class TestSetMessage:
     def test_raises_key_error_for_unknown_key(self):
         with pytest.raises(KeyError):
             message_store.set_message("no_existe", "contenido", updated_by="qa")
+
+
+class TestCreateMessage:
+    def test_raises_value_error_for_existing_key(self):
+        with pytest.raises(ValueError):
+            message_store.create_message(
+                message_key="welcome_message",
+                message_type="text",
+                state_name=None,
+                label="x",
+                content="x",
+                updated_by="qa",
+            )
+
+    def test_raises_value_error_for_invalid_type(self):
+        with pytest.raises(ValueError):
+            message_store.create_message(
+                message_key="nuevo",
+                message_type="video",
+                state_name=None,
+                label="x",
+                content="x",
+                updated_by="qa",
+            )
+
+    def test_raises_value_error_for_over_limit_content(self):
+        with pytest.raises(ValueError):
+            message_store.create_message(
+                message_key="nuevo",
+                message_type="list_row_title",
+                state_name=None,
+                label="x",
+                content="x" * 25,
+                updated_by="qa",
+            )
+
+    def test_raises_runtime_error_without_bigquery(self):
+        with pytest.raises(RuntimeError):
+            message_store.create_message(
+                message_key="nuevo_valido",
+                message_type="text",
+                state_name=None,
+                label="x",
+                content="x",
+                updated_by="qa",
+            )
 
 
 class TestMessageLimits:

@@ -563,8 +563,7 @@ class EstadoInicial(FlowState):
         if attempts >= 3:
             return _set_state_and_reply(
                 context,
-                "EstadoSoporte",
-                "Perdón, no estoy pudiendo entender tu consulta. Te voy a derivar con una persona más calificada que te va a ayudar. 🤝",
+                "EstadoSoporte",message_store.get_message("support_fallback_text", default="Perdón, no estoy pudiendo entender tu consulta. Te voy a derivar con una persona más calificada que te va a ayudar. 🤝"),
                 sentiment=sentiment,
                 handoff=True,
             )
@@ -595,7 +594,12 @@ class EstadoPreFlujo(FlowState):
         return message_store.get_message("pre_flujo_message", default=PRE_FLUJO_MESSAGE)
 
     def get_buttons(self, context: FlowContext) -> List[Button]:
-        return [Button("continuar", "CONTINUAR")]
+        return [
+            Button(
+                "continuar",
+                message_store.get_message("preflujo_continuar_button", default="CONTINUAR"),
+            ),
+        ]
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
         sentiment = detect_sentiment_basic(user_text)
@@ -608,16 +612,14 @@ class EstadoPreFlujo(FlowState):
                     context.set_var("flujo", "registro")
                     return _set_state_and_reply(
                         context,
-                        "EstadoPedirMail",
-                        "Sigamos estos pasos así te puedo ayudar a ingresar en la Plataforma de Beneficios.\n\n¿Con qué mail estás intentando ingresar? 📧",
+                        "EstadoPedirMail",message_store.get_message("registro_intro_text", default="Sigamos estos pasos así te puedo ayudar a ingresar en la Plataforma de Beneficios.\n\n¿Con qué mail estás intentando ingresar? 📧"),
                         sentiment=sentiment,
                     )
                 elif opcion == "no_veo_precios":
                     context.set_var("flujo", "precios")
                     return _set_state_and_reply(
                         context,
-                        "EstadoPedirMail",
-                        "Si ya ingresaste y no ves precios, sigamos estos pasos así podás acceder a los precios con descuento por ser parte de la Plataforma.\n\n¿Con qué mail estás intentando ingresar? 📧",
+                        "EstadoPedirMail",message_store.get_message("precios_intro_text", default="Si ya ingresaste y no ves precios, sigamos estos pasos así podás acceder a los precios con descuento por ser parte de la Plataforma.\n\n¿Con qué mail estás intentando ingresar? 📧"),
                         sentiment=sentiment,
                     )
                 elif opcion == "no_veo_descuentos":
@@ -625,15 +627,13 @@ class EstadoPreFlujo(FlowState):
                     context.set_var("form_substep", "pregunta_cargaste")
                     return _set_state_and_reply(
                         context,
-                        "EstadoNoVeoDescuentos",
-                        "Si ingresaste con tu mail personal y no ves los descuentos aplicados, sigamos estos pasos así te ayudo a solucionarlo.\n\nPara comenzar, ¿cargaste el formulario que encontrás en la publicación del beneficio?",
+                        "EstadoNoVeoDescuentos",message_store.get_message("descuentos_intro_text", default="Si ingresaste con tu mail personal y no ves los descuentos aplicados, sigamos estos pasos así te ayudo a solucionarlo.\n\nPara comenzar, ¿cargaste el formulario que encontrás en la publicación del beneficio?"),
                         sentiment=sentiment,
                     )
                 elif opcion == "info_pedido":
                     return _set_state_and_reply(
                         context,
-                        "EstadoInfoPedido",
-                        "Si necesitás información sobre tu pedido, escribinos por WhatsApp y te ayudamos 😊💙\n\nhttps://wa.me/5491153835784",
+                        "EstadoInfoPedido",message_store.get_message("info_pedido_text", default="Si necesitás información sobre tu pedido, escribinos por WhatsApp y te ayudamos 😊💙\n\nhttps://wa.me/5491153835784"),
                         sentiment=sentiment,
                     )
 
@@ -642,16 +642,14 @@ class EstadoPreFlujo(FlowState):
             context.set_var("flujo", "registro")
             return _set_state_and_reply(
                 context,
-                "EstadoPedirMail",
-                "Sigamos estos pasos así te puedo ayudar a ingresar en la Plataforma de Beneficios.\n\n¿Con qué mail estás intentando ingresar? 📧",
+                "EstadoPedirMail",message_store.get_message("registro_intro_text", default="Sigamos estos pasos así te puedo ayudar a ingresar en la Plataforma de Beneficios.\n\n¿Con qué mail estás intentando ingresar? 📧"),
                 sentiment=sentiment,
             )
         elif opcion == "no_veo_precios":
             context.set_var("flujo", "precios")
             return _set_state_and_reply(
                 context,
-                "EstadoPedirMail",
-                "Si ya ingresaste y no ves precios, sigamos estos pasos así podás acceder a los precios con descuento por ser parte de la Plataforma.\n\n¿Con qué mail estás intentando ingresar? 📧",
+                "EstadoPedirMail",message_store.get_message("precios_intro_text", default="Si ya ingresaste y no ves precios, sigamos estos pasos así podás acceder a los precios con descuento por ser parte de la Plataforma.\n\n¿Con qué mail estás intentando ingresar? 📧"),
                 sentiment=sentiment,
             )
         elif opcion == "no_veo_descuentos":
@@ -659,15 +657,13 @@ class EstadoPreFlujo(FlowState):
             context.set_var("form_substep", "pregunta_cargaste")
             return _set_state_and_reply(
                 context,
-                "EstadoNoVeoDescuentos",
-                "Si ingresaste con tu mail personal y no ves los descuentos aplicados, sigamos estos pasos así te ayudo a solucionarlo.\n\nPara comenzar, ¿cargaste el formulario que encontrás en la publicación del beneficio?",
+                "EstadoNoVeoDescuentos",message_store.get_message("descuentos_intro_text", default="Si ingresaste con tu mail personal y no ves los descuentos aplicados, sigamos estos pasos así te ayudo a solucionarlo.\n\nPara comenzar, ¿cargaste el formulario que encontrás en la publicación del beneficio?"),
                 sentiment=sentiment,
             )
         elif opcion == "info_pedido":
             return _set_state_and_reply(
                 context,
-                "EstadoInfoPedido",
-                "Si necesitás información sobre tu pedido, escribinos por WhatsApp y te ayudamos 😊💙\n\nhttps://wa.me/5491153835784",
+                "EstadoInfoPedido",message_store.get_message("info_pedido_text", default="Si necesitás información sobre tu pedido, escribinos por WhatsApp y te ayudamos 😊💙\n\nhttps://wa.me/5491153835784"),
                 sentiment=sentiment,
             )
 
@@ -683,18 +679,18 @@ class EstadoNoVeoDescuentos(FlowState):
         substep = context.get_var("descuentos_substep", "pregunta_cargaste")
         if substep == "pregunta_cargaste":
             return [
-                Button("si", "✅ Sí, lo cargué"),
-                Button("no", "❌ No lo cargué"),
+                Button("si", message_store.get_message("generic_si_loaded_button", default="✅ Sí, lo cargué")),
+                Button("no", message_store.get_message("generic_no_loaded_button", default="❌ No lo cargué")),
             ]
         elif substep == "pregunta_cuando":
             return [
-                Button("menos_48", "Menos de 48hs"),
-                Button("mas_48", "Más de 48hs"),
+                Button("menos_48", message_store.get_message("generic_menos_48_button", default="Menos de 48hs")),
+                Button("mas_48", message_store.get_message("generic_mas_48_button", default="Más de 48hs")),
             ]
         elif substep == "esperando_resultado":
             return [
-                Button("funciono", "✅ Funcionó"),
-                Button("no_funciono", "❌ No funcionó"),
+                Button("funciono", message_store.get_message("generic_funciono_button", default="✅ Funcionó")),
+                Button("no_funciono", message_store.get_message("generic_no_funciono_button", default="❌ No funcionó")),
             ]
         return []
 
@@ -709,15 +705,13 @@ class EstadoNoVeoDescuentos(FlowState):
                 if button_id == "si":
                     context.set_var("descuentos_substep", "pregunta_cuando")
                     return self.response(
-                        context,
-                        "¿Cuándo lo cargaste?",
+                        context,message_store.get_message("ask_when_loaded_text", default="¿Cuándo lo cargaste?"),
                         sentiment=sentiment,
                     )
                 elif button_id == "no":
                     context.set_var("descuentos_substep", "fin")
                     return self.response(
-                        context,
-                        "Hay un formulario en la publicación del beneficio que tenés que completar. Una vez hecho eso, esperá 48 horas y volvé a intentar. Si seguís sin ver los descuentos, avísame y te derivo con soporte.",
+                        context,message_store.get_message("descuentos_not_loaded_text", default="Hay un formulario en la publicación del beneficio que tenés que completar. Una vez hecho eso, esperá 48 horas y volvé a intentar. Si seguís sin ver los descuentos, avísame y te derivo con soporte."),
                         sentiment=sentiment,
                     )
 
@@ -726,8 +720,7 @@ class EstadoNoVeoDescuentos(FlowState):
                 context.set_var("descuentos_substep", "fin")
                 return _set_state_and_reply(
                     context,
-                    "EstadoSoporte",
-                    "Hay un formulario de registro en la publicación del beneficio que necesitás completar para ver los descuentos. Te voy a derivar con una persona más calificada para que pueda ayudarte.",
+                    "EstadoSoporte",message_store.get_message("descuentos_form_confusion_handoff_text", default="Hay un formulario de registro en la publicación del beneficio que necesitás completar para ver los descuentos. Te voy a derivar con una persona más calificada para que pueda ayudarte."),
                     sentiment=sentiment,
                     handoff=True,
                 )
@@ -735,7 +728,7 @@ class EstadoNoVeoDescuentos(FlowState):
             answer = parse_yes_no(user_text)
             if answer is True:
                 context.set_var("descuentos_substep", "pregunta_cuando")
-                return self.response(context, "¿Cuándo lo cargaste?", sentiment=sentiment)
+                return self.response(context, message_store.get_message("ask_when_loaded_text", default="¿Cuándo lo cargaste?"), sentiment=sentiment)
             if answer is False:
                 context.set_var("descuentos_substep", "fin")
                 return self.response(
@@ -744,7 +737,7 @@ class EstadoNoVeoDescuentos(FlowState):
                     sentiment=sentiment,
                 )
 
-            return self.response(context, "Contame si llegaste a cargar el formulario.", sentiment=sentiment)
+            return self.response(context, message_store.get_message("ask_loaded_form_text", default="Contame si llegaste a cargar el formulario."), sentiment=sentiment)
 
         if substep == "pregunta_cuando":
             # Manejar respuesta de botón
@@ -753,16 +746,14 @@ class EstadoNoVeoDescuentos(FlowState):
                 if button_id == "menos_48":
                     context.set_var("descuentos_substep", "fin")
                     return self.response(
-                        context,
-                        "Perfecto. En ese caso hay que esperar 48 horas para que se procese el registro. Una vez que pase ese tiempo, probá de nuevo. 😊",
+                        context,message_store.get_message("descuentos_wait_48_text", default="Perfecto. En ese caso hay que esperar 48 horas para que se procese el registro. Una vez que pase ese tiempo, probá de nuevo. 😊"),
                         sentiment=sentiment,
                     )
                 elif button_id == "mas_48":
                     context.set_var("descuentos_substep", "esperando_resultado")
                     return _set_state_and_reply(
                         context,
-                        "EstadoPasosInicioSesion",
-                        "Como ya pasaron más de 48 horas, probá iniciando sesión.\n\nHacé click en 'RECIBIR CÓDIGO DE ACCESO POR E-MAIL'. Ingresá tu dirección de correo electrónico y hacé click en 'ENVIAR'.\n\nVas a recibir un código en tu mail. Volvé a la página e ingresalo.",
+                        "EstadoPasosInicioSesion",message_store.get_message("descuentos_login_steps_text", default="Como ya pasaron más de 48 horas, probá iniciando sesión.\n\nHacé click en 'RECIBIR CÓDIGO DE ACCESO POR E-MAIL'. Ingresá tu dirección de correo electrónico y hacé click en 'ENVIAR'.\n\nVas a recibir un código en tu mail. Volvé a la página e ingresalo."),
                         sentiment=sentiment,
                     )
 
@@ -770,16 +761,14 @@ class EstadoNoVeoDescuentos(FlowState):
             hours = parse_relative_hours(user_text)
             if hours is None:
                 return self.response(
-                    context,
-                    "Decime aproximadamente cuándo lo cargaste.",
+                    context,message_store.get_message("ask_approx_when_text", default="Decime aproximadamente cuándo lo cargaste."),
                     sentiment=sentiment,
                 )
 
             if hours < 48:
                 context.set_var("descuentos_substep", "fin")
                 return self.response(
-                    context,
-                    "Perfecto. En ese caso hay que esperar 48 horas para que se procese el registro. Una vez que pase ese tiempo, probá de nuevo. 😊",
+                    context,message_store.get_message("descuentos_wait_48_text", default="Perfecto. En ese caso hay que esperar 48 horas para que se procese el registro. Una vez que pase ese tiempo, probá de nuevo. 😊"),
                     sentiment=sentiment,
                 )
 
@@ -791,7 +780,7 @@ class EstadoNoVeoDescuentos(FlowState):
                 sentiment=sentiment,
             )
 
-        return self.response(context, "El flujo de descuentos ya quedó resuelto.", sentiment=sentiment)
+        return self.response(context, message_store.get_message("descuentos_resolved_text", default="El flujo de descuentos ya quedó resuelto."), sentiment=sentiment)
 
 
 @StateFactory.register("EstadoInfoPedido")
@@ -800,8 +789,8 @@ class EstadoInfoPedido(FlowState):
 
     def get_buttons(self, context: FlowContext) -> List[Button]:
         return [
-            Button("si", "✅ Sí"),
-            Button("no", "❌ No"),
+            Button("si", message_store.get_message("generic_yes_button", default="✅ Sí")),
+            Button("no", message_store.get_message("generic_no_button", default="❌ No")),
         ]
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
@@ -820,8 +809,7 @@ class EstadoInfoPedido(FlowState):
             elif button_id == "no":
                 return _set_state_and_reply(
                     context,
-                    "EstadoFinalizado",
-                    "Excelente, nos vemos luego. Estoy muy feliz de haberte podido ayudar 😊💙",
+                    "EstadoFinalizado",message_store.get_message("goodbye_text", default="Excelente, nos vemos luego. Estoy muy feliz de haberte podido ayudar 😊💙"),
                     sentiment=sentiment,
                 )
 
@@ -837,14 +825,12 @@ class EstadoInfoPedido(FlowState):
         if answer is False:
             return _set_state_and_reply(
                 context,
-                "EstadoFinalizado",
-                "Excelente, nos vemos luego. Estoy muy feliz de haberte podido ayudar 😊💙",
+                "EstadoFinalizado",message_store.get_message("goodbye_text", default="Excelente, nos vemos luego. Estoy muy feliz de haberte podido ayudar 😊💙"),
                 sentiment=sentiment,
             )
 
         return self.response(
-            context,
-            "Si necesitás algo más, elegí una opción. Si no, podés cerrar la conversación.",
+            context,message_store.get_message("info_pedido_anything_else_text", default="Si necesitás algo más, elegí una opción. Si no, podés cerrar la conversación."),
             sentiment=sentiment,
         )
 
@@ -859,8 +845,7 @@ class EstadoPedirMail(FlowState):
 
         if not email_match:
             return self.response(
-                context,
-                "Necesito que me pases el mail con el que estás intentando ingresar. 📧",
+                context,message_store.get_message("ask_email_text", default="Necesito que me pases el mail con el que estás intentando ingresar. 📧"),
                 sentiment=sentiment,
             )
 
@@ -882,45 +867,39 @@ class EstadoPedirMail(FlowState):
                 context.set_var("form_substep", "pregunta_cargaste")
                 return _set_state_and_reply(
                     context,
-                    "EstadoFormulario",
-                    "Cargaste el formulario? 📝",
+                    "EstadoFormulario",message_store.get_message("formulario_question_text", default="Cargaste el formulario? 📝"),
                     sentiment=sentiment,
                 )
 
             if domain_type == "company":
                 return _set_state_and_reply(
                     context,
-                    "EstadoRegistroMailEmpresa",
-                    "El mail parece ser correcto y es un mail empresarial. Como no veo nada incorrecto en el registro, probá nuevamente y decime si te funcionó.",
+                    "EstadoRegistroMailEmpresa",message_store.get_message("pedir_mail_empresa_ok_text", default="El mail parece ser correcto y es un mail empresarial. Como no veo nada incorrecto en el registro, probá nuevamente y decime si te funcionó."),
                     sentiment=sentiment,
                 )
 
             return self.response(
-                context,
-                "No pude reconocer ese mail. Verificá que lo hayas escrito bien e intentalo de nuevo.",
+                context,message_store.get_message("unknown_email_domain_text", default="No pude reconocer ese mail. Verificá que lo hayas escrito bien e intentalo de nuevo."),
                 sentiment=sentiment,
             )
 
         if flujo == "precios":
             return _set_state_and_reply(
                 context,
-                "EstadoPortalBeneficios",
-                "Ya iniciaste sesión con tu mail? 🔐",
+                "EstadoPortalBeneficios",message_store.get_message("ask_logged_in_text", default="Ya iniciaste sesión con tu mail? 🔐"),
                 sentiment=sentiment,
             )
 
         if flujo == "login":
             return _set_state_and_reply(
                 context,
-                "EstadoLogin",
-                "Ya habías ingresado antes al portal de beneficios? 🔐",
+                "EstadoLogin",message_store.get_message("ask_ingresado_antes_text", default="Ya habías ingresado antes al portal de beneficios? 🔐"),
                 sentiment=sentiment,
             )
 
         return _set_state_and_reply(
             context,
-            "EstadoSoporte",
-            "No estoy pudiendo identificar bien el problema. Te voy a derivar con una persona más calificada. 🤝",
+            "EstadoSoporte",message_store.get_message("unknown_problem_handoff_text", default="No estoy pudiendo identificar bien el problema. Te voy a derivar con una persona más calificada. 🤝"),
             sentiment=sentiment,
             handoff=True,
         )
@@ -930,8 +909,8 @@ class EstadoPedirMail(FlowState):
 class EstadoRegistroMailEmpresa(FlowState):
     def get_buttons(self, context: FlowContext) -> List[Button]:
         return [
-            Button("si", "✅ Sí"),
-            Button("no", "❌ No"),
+            Button("si", message_store.get_message("generic_yes_button", default="✅ Sí")),
+            Button("no", message_store.get_message("generic_no_button", default="❌ No")),
         ]
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
@@ -942,16 +921,14 @@ class EstadoRegistroMailEmpresa(FlowState):
             if button_id == "si":
                 return _set_state_and_reply(
                     context,
-                    "EstadoConsultaAdicional",
-                    "Perfecto, te ayudo con algo más?",
+                    "EstadoConsultaAdicional",message_store.get_message("follow_up_help_text", default="Perfecto, te ayudo con algo más?"),
                     sentiment=sentiment,
                 )
             elif button_id == "no":
                 context.set_var("clear_nav_step", "confirmar")
                 return _set_state_and_reply(
                     context,
-                    "EstadoBorrarNavegacion",
-                    "En ese caso, borremos los datos de navegación del navegador para volver a intentarlo. Te parece?",
+                    "EstadoBorrarNavegacion",message_store.get_message("borrar_nav_confirm_text", default="En ese caso, borremos los datos de navegación del navegador para volver a intentarlo. Te parece?"),
                     sentiment=sentiment,
                 )
 
@@ -960,8 +937,7 @@ class EstadoRegistroMailEmpresa(FlowState):
         if answer is True:
             return _set_state_and_reply(
                 context,
-                "EstadoConsultaAdicional",
-                "Perfecto, te ayudo con algo más?",
+                "EstadoConsultaAdicional",message_store.get_message("follow_up_help_text", default="Perfecto, te ayudo con algo más?"),
                 sentiment=sentiment,
             )
 
@@ -969,14 +945,12 @@ class EstadoRegistroMailEmpresa(FlowState):
             context.set_var("clear_nav_step", "confirmar")
             return _set_state_and_reply(
                 context,
-                "EstadoBorrarNavegacion",
-                "En ese caso, borremos los datos de navegación del navegador para volver a intentarlo. Te parece?",
+                "EstadoBorrarNavegacion",message_store.get_message("borrar_nav_confirm_text", default="En ese caso, borremos los datos de navegación del navegador para volver a intentarlo. Te parece?"),
                 sentiment=sentiment,
             )
 
         return self.response(
-            context,
-            "Contame si pudiste avanzar con ese mail.",
+            context,message_store.get_message("registro_mail_empresa_ask_progress_text", default="Contame si pudiste avanzar con ese mail."),
             sentiment=sentiment,
         )
 
@@ -985,8 +959,8 @@ class EstadoRegistroMailEmpresa(FlowState):
 class EstadoLogin(FlowState):
     def get_buttons(self, context: FlowContext) -> List[Button]:
         return [
-            Button("si", "✅ Sí"),
-            Button("no", "❌ No"),
+            Button("si", message_store.get_message("generic_yes_button", default="✅ Sí")),
+            Button("no", message_store.get_message("generic_no_button", default="❌ No")),
         ]
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
@@ -998,18 +972,13 @@ class EstadoLogin(FlowState):
                 context.set_var("login_step", 3)
                 return _set_state_and_reply(
                     context,
-                    "EstadoPasosInicioSesion",
-                    'Si ya recibiste el mail de confirmación con el acceso a la Plataforma, hacé click en "RECIBIR CÓDIGO DE ACCESO POR E-MAIL".\n'
-                    'Ingresá tu dirección de correo electrónico, y hacé click en "ENVIAR".\n\n'
-                    "Vas a recibir una clave numérica en tu mail. Volvé a la página e ingresalo.\n\n"
-                    "Deberías acceder sin problemas",
+                    "EstadoPasosInicioSesion",message_store.get_message("login_steps_intro_text", default="Si ya recibiste el mail de confirmación con el acceso a la Plataforma, hacé click en \"RECIBIR CÓDIGO DE ACCESO POR E-MAIL\".\nIngresá tu dirección de correo electrónico, y hacé click en \"ENVIAR\".\n\nVas a recibir una clave numérica en tu mail. Volvé a la página e ingresalo.\n\nDeberías acceder sin problemas"),
                     sentiment=sentiment,
                 )
             elif button_id == "no":
                 return _set_state_and_reply(
                     context,
-                    "EstadoFormulario",
-                    "Cargaste el formulario? 📝",
+                    "EstadoFormulario",message_store.get_message("formulario_question_text", default="Cargaste el formulario? 📝"),
                     sentiment=sentiment,
                 )
 
@@ -1019,16 +988,14 @@ class EstadoLogin(FlowState):
             context.set_var("login_step", 3)
             return _set_state_and_reply(
                 context,
-                "EstadoPasosInicioSesion",
-                'Hacé click en "RECIBIR CÓDIGO DE ACCESO POR E-MAIL", ingresá tu mail y tocá "ENVIAR". Te llega un código al mail, volvé y cargalo.',
+                "EstadoPasosInicioSesion",message_store.get_message("login_steps_short_text", default="Hacé click en \"RECIBIR CÓDIGO DE ACCESO POR E-MAIL\", ingresá tu mail y tocá \"ENVIAR\". Te llega un código al mail, volvé y cargalo."),
                 sentiment=sentiment,
             )
 
         if answer is False:
             return _set_state_and_reply(
                 context,
-                "EstadoFormulario",
-                "Cargaste el formulario? 📝",
+                "EstadoFormulario",message_store.get_message("formulario_question_text", default="Cargaste el formulario? 📝"),
                 sentiment=sentiment,
             )
 
@@ -1045,8 +1012,8 @@ class EstadoPasosInicioSesion(FlowState):
         step = int(context.get_var("login_step", 0))
         if step >= 3:
             return [
-                Button("funciono", "✅ Funcionó"),
-                Button("no_funciono", "❌ No funcionó"),
+                Button("funciono", message_store.get_message("generic_funciono_button", default="✅ Funcionó")),
+                Button("no_funciono", message_store.get_message("generic_no_funciono_button", default="❌ No funcionó")),
             ]
         return []
 
@@ -1057,22 +1024,19 @@ class EstadoPasosInicioSesion(FlowState):
         if step == 0:
             context.set_var("login_step", 1)
             return self.response(
-                context,
-                "Hacé click en 'RECIBIR CÓDIGO DE ACCESO POR E-MAIL'.",
+                context,message_store.get_message("pasos_step1_text", default="Hacé click en 'RECIBIR CÓDIGO DE ACCESO POR E-MAIL'."),
                 sentiment=sentiment,
             )
         if step == 1:
             context.set_var("login_step", 2)
             return self.response(
-                context,
-                "Ingresá tu dirección de correo electrónico y hacé click en 'ENVIAR'.",
+                context,message_store.get_message("pasos_step2_text", default="Ingresá tu dirección de correo electrónico y hacé click en 'ENVIAR'."),
                 sentiment=sentiment,
             )
         if step == 2:
             context.set_var("login_step", 3)
             return self.response(
-                context,
-                "Vas a recibir un código en tu mail corporativo. Volvé a la página e ingresalo. 📧",
+                context,message_store.get_message("pasos_step3_text", default="Vas a recibir un código en tu mail corporativo. Volvé a la página e ingresalo. 📧"),
                 sentiment=sentiment,
             )
 
@@ -1083,15 +1047,13 @@ class EstadoPasosInicioSesion(FlowState):
                 context.set_var("login_step", 0)
                 return _set_state_and_reply(
                     context,
-                    "EstadoConsultaAdicional",
-                    "Perfecto, te ayudo con algo más?",
+                    "EstadoConsultaAdicional",message_store.get_message("follow_up_help_text", default="Perfecto, te ayudo con algo más?"),
                     sentiment=sentiment,
                 )
             elif button_id == "no_funciono":
                 return _set_state_and_reply(
                     context,
-                    "EstadoSoporte",
-                    "Perdón, no estoy pudiendo resolver esto desde acá. Te voy a derivar con una persona más calificada que lo resuelva con vos. 🤝",
+                    "EstadoSoporte",message_store.get_message("handoff_text", default="Perdón, no estoy pudiendo resolver esto desde acá. Te voy a derivar con una persona más calificada que lo resuelva con vos. 🤝"),
                     sentiment=sentiment,
                     handoff=True,
                 )
@@ -1101,29 +1063,27 @@ class EstadoPasosInicioSesion(FlowState):
             context.set_var("login_step", 0)
             return _set_state_and_reply(
                 context,
-                "EstadoConsultaAdicional",
-                "Perfecto, te ayudo con algo más?",
+                "EstadoConsultaAdicional",message_store.get_message("follow_up_help_text", default="Perfecto, te ayudo con algo más?"),
                 sentiment=sentiment,
             )
 
         if answer is False:
             return _set_state_and_reply(
                 context,
-                "EstadoSoporte",
-                "Perdón, no estoy pudiendo resolver esto desde acá. Te voy a derivar con una persona más calificada que lo resuelva con vos. 🤝",
+                "EstadoSoporte",message_store.get_message("handoff_text", default="Perdón, no estoy pudiendo resolver esto desde acá. Te voy a derivar con una persona más calificada que lo resuelva con vos. 🤝"),
                 sentiment=sentiment,
                 handoff=True,
             )
 
-        return self.response(context, "Contame si funcionó.", sentiment=sentiment)
+        return self.response(context, message_store.get_message("pasos_ask_worked_text", default="Contame si funcionó."), sentiment=sentiment)
 
 
 @StateFactory.register("EstadoConsultaAdicional")
 class EstadoConsultaAdicional(FlowState):
     def get_buttons(self, context: FlowContext) -> List[Button]:
         return [
-            Button("si", "✅ Sí"),
-            Button("no", "❌ No"),
+            Button("si", message_store.get_message("generic_yes_button", default="✅ Sí")),
+            Button("no", message_store.get_message("generic_no_button", default="❌ No")),
         ]
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
@@ -1134,8 +1094,7 @@ class EstadoConsultaAdicional(FlowState):
             if button_id == "no":
                 return _set_state_and_reply(
                     context,
-                    "EstadoFinalizado",
-                    "Excelente, nos vemos luego. Estoy muy feliz de haberte podido ayudar 😊💙",
+                    "EstadoFinalizado",message_store.get_message("goodbye_text", default="Excelente, nos vemos luego. Estoy muy feliz de haberte podido ayudar 😊💙"),
                     sentiment=sentiment,
                 )
             elif button_id == "si":
@@ -1151,8 +1110,7 @@ class EstadoConsultaAdicional(FlowState):
         if answer is False:
             return _set_state_and_reply(
                 context,
-                "EstadoFinalizado",
-                "Excelente, nos vemos luego. Estoy muy feliz de haberte podido ayudar 😊💙",
+                "EstadoFinalizado",message_store.get_message("goodbye_text", default="Excelente, nos vemos luego. Estoy muy feliz de haberte podido ayudar 😊💙"),
                 sentiment=sentiment,
             )
 
@@ -1164,7 +1122,7 @@ class EstadoConsultaAdicional(FlowState):
                 sentiment=sentiment,
             )
 
-        return self.response(context, "Perfecto, te ayudo con algo más?", sentiment=sentiment)
+        return self.response(context, message_store.get_message("follow_up_help_text", default="Perfecto, te ayudo con algo más?"), sentiment=sentiment)
 
 
 @StateFactory.register("EstadoFinalizado")
@@ -1174,7 +1132,7 @@ class EstadoFinalizado(FlowState):
 
     def get_buttons(self, context: FlowContext) -> List[Button]:
         return [
-            Button("volver", "Volver al inicio"),
+            Button("volver", message_store.get_message("volver_inicio_button", default="Volver al inicio")),
         ]
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
@@ -1191,8 +1149,7 @@ class EstadoFinalizado(FlowState):
                 )
 
         return self.response(
-            context,
-            "Excelente, nos vemos luego. Estoy muy feliz de haberte podido ayudar 😊💙",
+            context,message_store.get_message("goodbye_text", default="Excelente, nos vemos luego. Estoy muy feliz de haberte podido ayudar 😊💙"),
             sentiment=sentiment,
         )
 
@@ -1203,13 +1160,13 @@ class EstadoFormulario(FlowState):
         substep = context.get_var("form_substep", "pregunta_cargaste")
         if substep == "pregunta_cargaste":
             return [
-                Button("si", "✅ Sí, lo cargué"),
-                Button("no", "❌ No lo cargué"),
+                Button("si", message_store.get_message("generic_si_loaded_button", default="✅ Sí, lo cargué")),
+                Button("no", message_store.get_message("generic_no_loaded_button", default="❌ No lo cargué")),
             ]
         elif substep == "pregunta_cuando":
             return [
-                Button("menos_48", "Menos de 48hs"),
-                Button("mas_48", "Más de 48hs"),
+                Button("menos_48", message_store.get_message("generic_menos_48_button", default="Menos de 48hs")),
+                Button("mas_48", message_store.get_message("generic_mas_48_button", default="Más de 48hs")),
             ]
         return []
 
@@ -1223,12 +1180,11 @@ class EstadoFormulario(FlowState):
                 button_id = user_text.replace("button_", "")
                 if button_id == "si":
                     context.set_var("form_substep", "pregunta_cuando")
-                    return self.response(context, "¿Cuándo lo cargaste?", sentiment=sentiment)
+                    return self.response(context, message_store.get_message("ask_when_loaded_text", default="¿Cuándo lo cargaste?"), sentiment=sentiment)
                 elif button_id == "no":
                     context.set_var("form_substep", "fin")
                     return self.response(
-                        context,
-                        "Hay un formulario en la página de registro que tenés que completar. Una vez hecho eso, esperá 48 horas y volvé a intentar.",
+                        context,message_store.get_message("not_loaded_form_text", default="Hay un formulario en la página de registro que tenés que completar. Una vez hecho eso, esperá 48 horas y volvé a intentar."),
                         sentiment=sentiment,
                     )
 
@@ -1236,8 +1192,7 @@ class EstadoFormulario(FlowState):
                 context.set_var("form_substep", "fin")
                 return _set_state_and_reply(
                     context,
-                    "EstadoSoporte",
-                    "Hay un formulario de registro en la página que necesitás completar para poder avanzar. Te voy a derivar con una persona más calificada para que pueda ayudarte.",
+                    "EstadoSoporte",message_store.get_message("formulario_confusion_handoff_text", default="Hay un formulario de registro en la página que necesitás completar para poder avanzar. Te voy a derivar con una persona más calificada para que pueda ayudarte."),
                     sentiment=sentiment,
                     handoff=True,
                 )
@@ -1246,17 +1201,16 @@ class EstadoFormulario(FlowState):
 
             if answer is True:
                 context.set_var("form_substep", "pregunta_cuando")
-                return self.response(context, "¿Cuándo lo cargaste?", sentiment=sentiment)
+                return self.response(context, message_store.get_message("ask_when_loaded_text", default="¿Cuándo lo cargaste?"), sentiment=sentiment)
 
             if answer is False:
                 context.set_var("form_substep", "fin")
                 return self.response(
-                    context,
-                    "Hay un formulario en la página de registro que tenés que completar. Una vez hecho eso, esperá 48 horas y volvé a intentar.",
+                    context,message_store.get_message("not_loaded_form_text", default="Hay un formulario en la página de registro que tenés que completar. Una vez hecho eso, esperá 48 horas y volvé a intentar."),
                     sentiment=sentiment,
                 )
 
-            return self.response(context, "Contame si llegaste a cargar el formulario.", sentiment=sentiment)
+            return self.response(context, message_store.get_message("ask_loaded_form_text", default="Contame si llegaste a cargar el formulario."), sentiment=sentiment)
 
         if substep == "pregunta_cuando":
             # Manejar respuesta de botón
@@ -1265,52 +1219,47 @@ class EstadoFormulario(FlowState):
                 if button_id == "menos_48":
                     context.set_var("form_substep", "fin")
                     return self.response(
-                        context,
-                        "Perfecto. En ese caso hay que esperar 48 horas para que termine el registro. 😊",
+                        context,message_store.get_message("wait_48_form_text", default="Perfecto. En ese caso hay que esperar 48 horas para que termine el registro. 😊"),
                         sentiment=sentiment,
                     )
                 elif button_id == "mas_48":
                     context.set_var("form_substep", "fin")
                     return _set_state_and_reply(
                         context,
-                        "EstadoPasosInicioSesion",
-                        "Como ya pasaron más de 48 horas, probá iniciando sesión.\n\nHacé click en 'RECIBIR CÓDIGO DE ACCESO POR E-MAIL'.",
+                        "EstadoPasosInicioSesion",message_store.get_message("formulario_login_steps_text", default="Como ya pasaron más de 48 horas, probá iniciando sesión.\n\nHacé click en 'RECIBIR CÓDIGO DE ACCESO POR E-MAIL'."),
                         sentiment=sentiment,
                     )
 
             hours = parse_relative_hours(user_text)
             if hours is None:
                 return self.response(
-                    context,
-                    "Decime aproximadamente cuándo lo cargaste.",
+                    context,message_store.get_message("ask_approx_when_text", default="Decime aproximadamente cuándo lo cargaste."),
                     sentiment=sentiment,
                 )
 
             if hours < 48:
                 context.set_var("form_substep", "fin")
                 return self.response(
-                    context,
-                    "Perfecto. En ese caso hay que esperar 48 horas para que termine el registro. 😊",
+                    context,message_store.get_message("wait_48_form_text", default="Perfecto. En ese caso hay que esperar 48 horas para que termine el registro. 😊"),
                     sentiment=sentiment,
                 )
 
             context.set_var("form_substep", "fin")
             return _set_state_and_reply(
                 context,
-                "EstadoPasosInicioSesion",
-                "Hacé click en 'RECIBIR CÓDIGO DE ACCESO POR E-MAIL'.",
+                "EstadoPasosInicioSesion",message_store.get_message("pasos_step1_text", default="Hacé click en 'RECIBIR CÓDIGO DE ACCESO POR E-MAIL'."),
                 sentiment=sentiment,
             )
 
-        return self.response(context, "El flujo de formulario ya quedó resuelto.", sentiment=sentiment)
+        return self.response(context, message_store.get_message("formulario_resolved_text", default="El flujo de formulario ya quedó resuelto."), sentiment=sentiment)
 
 
 @StateFactory.register("EstadoPortalBeneficios")
 class EstadoPortalBeneficios(FlowState):
     def get_buttons(self, context: FlowContext) -> List[Button]:
         return [
-            Button("si", "✅ Sí"),
-            Button("no", "❌ No"),
+            Button("si", message_store.get_message("generic_yes_button", default="✅ Sí")),
+            Button("no", message_store.get_message("generic_no_button", default="❌ No")),
         ]
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
@@ -1321,15 +1270,13 @@ class EstadoPortalBeneficios(FlowState):
             if button_id == "si":
                 return _set_state_and_reply(
                     context,
-                    "EstadoBorrarNavegacion",
-                    "Lo mejor en este caso es borrar los datos de navegación para asegurarnos de que salga bien. Te parece? 🧹",
+                    "EstadoBorrarNavegacion",message_store.get_message("portal_beneficios_clear_nav_text", default="Lo mejor en este caso es borrar los datos de navegación para asegurarnos de que salga bien. Te parece? 🧹"),
                     sentiment=sentiment,
                 )
             elif button_id == "no":
                 return _set_state_and_reply(
                     context,
-                    "EstadoLogin",
-                    "Ya habías ingresado antes al portal de beneficios? 🔐",
+                    "EstadoLogin",message_store.get_message("ask_ingresado_antes_text", default="Ya habías ingresado antes al portal de beneficios? 🔐"),
                     sentiment=sentiment,
                 )
 
@@ -1338,22 +1285,19 @@ class EstadoPortalBeneficios(FlowState):
         if answer is True:
             return _set_state_and_reply(
                 context,
-                "EstadoBorrarNavegacion",
-                "Lo mejor en este caso es borrar los datos de navegación para asegurarnos de que salga bien. Te parece? 🧹",
+                "EstadoBorrarNavegacion",message_store.get_message("portal_beneficios_clear_nav_text", default="Lo mejor en este caso es borrar los datos de navegación para asegurarnos de que salga bien. Te parece? 🧹"),
                 sentiment=sentiment,
             )
 
         if answer is False:
             return _set_state_and_reply(
                 context,
-                "EstadoLogin",
-                "Ya habías ingresado antes al portal de beneficios? 🔐",
+                "EstadoLogin",message_store.get_message("ask_ingresado_antes_text", default="Ya habías ingresado antes al portal de beneficios? 🔐"),
                 sentiment=sentiment,
             )
 
         return self.response(
-            context,
-            "Contame si ya iniciaste sesión en el portal de beneficios.",
+            context,message_store.get_message("portal_beneficios_ask_logged_in_fallback_text", default="Contame si ya iniciaste sesión en el portal de beneficios."),
             sentiment=sentiment,
         )
 
@@ -1364,17 +1308,17 @@ class EstadoBorrarNavegacion(FlowState):
         step = context.get_var("clear_nav_step", "confirmar")
         if step in ["confirmar", "sabe_como", "explicar_motivo"]:
             return [
-                Button("si", "✅ Sí"),
-                Button("no", "❌ No"),
+                Button("si", message_store.get_message("generic_yes_button", default="✅ Sí")),
+                Button("no", message_store.get_message("generic_no_button", default="❌ No")),
             ]
         elif step == "esperando_confirmacion":
             return [
-                Button("listo", "✅ Ya lo hice"),
+                Button("listo", message_store.get_message("generic_listo_button", default="✅ Ya lo hice")),
             ]
         elif step == "finalizado":
             return [
-                Button("funciono", "✅ Funcionó"),
-                Button("no_funciono", "❌ No funcionó"),
+                Button("funciono", message_store.get_message("generic_funciono_button", default="✅ Funcionó")),
+                Button("no_funciono", message_store.get_message("generic_no_funciono_button", default="❌ No funcionó")),
             ]
         return []
 
@@ -1389,85 +1333,79 @@ class EstadoBorrarNavegacion(FlowState):
                 button_id = user_text.replace("button_", "")
                 if button_id == "si":
                     context.set_var("clear_nav_step", "sabe_como")
-                    return self.response(context, "Sabés cómo hacerlo?", sentiment=sentiment)
+                    return self.response(context, message_store.get_message("borrar_nav_ask_know_how_text", default="Sabés cómo hacerlo?"), sentiment=sentiment)
                 elif button_id == "no":
                     context.set_var("clear_nav_step", "explicar_motivo")
                     return self.response(
-                        context,
-                        "Te cuento por qué te lo pido! A veces el navegador guarda credenciales viejas o incorrectas del portal de beneficios, y eso puede ser justo lo que está causando el problema. Borrando esos datos le damos un reinicio limpio y lo más probable es que todo funcione de una. Sabés cómo hacerlo?",
+                        context,message_store.get_message("borrar_nav_explain_why_text", default="Te cuento por qué te lo pido! A veces el navegador guarda credenciales viejas o incorrectas del portal de beneficios, y eso puede ser justo lo que está causando el problema. Borrando esos datos le damos un reinicio limpio y lo más probable es que todo funcione de una. Sabés cómo hacerlo?"),
                         sentiment=sentiment,
                     )
 
             answer = parse_yes_no(user_text)
             if answer is True:
                 context.set_var("clear_nav_step", "sabe_como")
-                return self.response(context, "Sabés cómo hacerlo?", sentiment=sentiment)
+                return self.response(context, message_store.get_message("borrar_nav_ask_know_how_text", default="Sabés cómo hacerlo?"), sentiment=sentiment)
             if answer is False:
                 context.set_var("clear_nav_step", "explicar_motivo")
                 return self.response(
-                    context,
-                    "Te cuento por qué te lo pido! A veces el navegador guarda credenciales viejas o incorrectas del portal de beneficios, y eso puede ser justo lo que está causando el problema. Borrando esos datos le damos un reinicio limpio y lo más probable es que todo funcione de una. Sabés cómo hacerlo?",
+                    context,message_store.get_message("borrar_nav_explain_why_text", default="Te cuento por qué te lo pido! A veces el navegador guarda credenciales viejas o incorrectas del portal de beneficios, y eso puede ser justo lo que está causando el problema. Borrando esos datos le damos un reinicio limpio y lo más probable es que todo funcione de una. Sabés cómo hacerlo?"),
                     sentiment=sentiment,
                 )
-            return self.response(context, "Contame si te parece bien que borremos los datos de navegación.", sentiment=sentiment)
+            return self.response(context, message_store.get_message("borrar_nav_ask_agree_text", default="Contame si te parece bien que borremos los datos de navegación."), sentiment=sentiment)
 
         if step == "explicar_motivo":
             if user_text.startswith("button_"):
                 button_id = user_text.replace("button_", "")
                 if button_id == "si":
                     context.set_var("clear_nav_step", "esperando_confirmacion")
-                    return self.response(context, "Perfecto, avisame cuando termines.", sentiment=sentiment)
+                    return self.response(context, message_store.get_message("borrar_nav_wait_finish_text", default="Perfecto, avisame cuando termines."), sentiment=sentiment)
                 elif button_id == "no":
                     context.set_var("clear_nav_step", "explicar_como")
                     return self.response(
-                        context,
-                        'Abrí Chrome y tocá en los tres puntos (arriba a la derecha).\nSeleccioná "Historial" y luego "Borrar datos de navegación".\nElegí el intervalo de tiempo y marcá los datos a eliminar.\nTocá en "Borrar datos".\n\nAvisame cuando termines.',
+                        context,message_store.get_message("borrar_nav_how_to_text", default="Abrí Chrome y tocá en los tres puntos (arriba a la derecha).\nSeleccioná \"Historial\" y luego \"Borrar datos de navegación\".\nElegí el intervalo de tiempo y marcá los datos a eliminar.\nTocá en \"Borrar datos\".\n\nAvisame cuando termines."),
                         sentiment=sentiment,
                     )
 
             answer = parse_yes_no(user_text)
             if answer is True:
                 context.set_var("clear_nav_step", "esperando_confirmacion")
-                return self.response(context, "Perfecto, avisame cuando termines.", sentiment=sentiment)
+                return self.response(context, message_store.get_message("borrar_nav_wait_finish_text", default="Perfecto, avisame cuando termines."), sentiment=sentiment)
             if answer is False:
                 context.set_var("clear_nav_step", "explicar_como")
                 return self.response(
-                    context,
-                    'Abrí Chrome y tocá en los tres puntos (arriba a la derecha).\nSeleccioná "Historial" y luego "Borrar datos de navegación".\nElegí el intervalo de tiempo y marcá los datos a eliminar.\nTocá en "Borrar datos".\n\nAvisame cuando termines.',
+                    context,message_store.get_message("borrar_nav_how_to_text", default="Abrí Chrome y tocá en los tres puntos (arriba a la derecha).\nSeleccioná \"Historial\" y luego \"Borrar datos de navegación\".\nElegí el intervalo de tiempo y marcá los datos a eliminar.\nTocá en \"Borrar datos\".\n\nAvisame cuando termines."),
                     sentiment=sentiment,
                 )
-            return self.response(context, "Contame si sabés cómo hacerlo.", sentiment=sentiment)
+            return self.response(context, message_store.get_message("borrar_nav_ask_know_how_fallback_text", default="Contame si sabés cómo hacerlo."), sentiment=sentiment)
 
         if step == "sabe_como":
             if user_text.startswith("button_"):
                 button_id = user_text.replace("button_", "")
                 if button_id == "si":
                     context.set_var("clear_nav_step", "esperando_confirmacion")
-                    return self.response(context, "Perfecto, avisame cuando termines.", sentiment=sentiment)
+                    return self.response(context, message_store.get_message("borrar_nav_wait_finish_text", default="Perfecto, avisame cuando termines."), sentiment=sentiment)
                 elif button_id == "no":
                     context.set_var("clear_nav_step", "explicar_como")
                     return self.response(
-                        context,
-                        'Abrí Chrome y tocá en los tres puntos (arriba a la derecha).\nSeleccioná "Historial" y luego "Borrar datos de navegación".\nElegí el intervalo de tiempo y marcá los datos a eliminar.\nTocá en "Borrar datos".\n\nAvisame cuando termines.',
+                        context,message_store.get_message("borrar_nav_how_to_text", default="Abrí Chrome y tocá en los tres puntos (arriba a la derecha).\nSeleccioná \"Historial\" y luego \"Borrar datos de navegación\".\nElegí el intervalo de tiempo y marcá los datos a eliminar.\nTocá en \"Borrar datos\".\n\nAvisame cuando termines."),
                         sentiment=sentiment,
                     )
 
             answer = parse_yes_no(user_text)
             if answer is True:
                 context.set_var("clear_nav_step", "esperando_confirmacion")
-                return self.response(context, "Perfecto, avisame cuando termines.", sentiment=sentiment)
+                return self.response(context, message_store.get_message("borrar_nav_wait_finish_text", default="Perfecto, avisame cuando termines."), sentiment=sentiment)
             if answer is False:
                 context.set_var("clear_nav_step", "explicar_como")
                 return self.response(
-                    context,
-                    'Abrí Chrome y tocá en los tres puntos (arriba a la derecha).\nSeleccioná "Historial" y luego "Borrar datos de navegación".\nElegí el intervalo de tiempo y marcá los datos a eliminar.\nTocá en "Borrar datos".\n\nAvisame cuando termines.',
+                    context,message_store.get_message("borrar_nav_how_to_text", default="Abrí Chrome y tocá en los tres puntos (arriba a la derecha).\nSeleccioná \"Historial\" y luego \"Borrar datos de navegación\".\nElegí el intervalo de tiempo y marcá los datos a eliminar.\nTocá en \"Borrar datos\".\n\nAvisame cuando termines."),
                     sentiment=sentiment,
                 )
-            return self.response(context, "Contame si sabés cómo hacerlo.", sentiment=sentiment)
+            return self.response(context, message_store.get_message("borrar_nav_ask_know_how_fallback_text", default="Contame si sabés cómo hacerlo."), sentiment=sentiment)
 
         if step == "explicar_como":
             context.set_var("clear_nav_step", "esperando_confirmacion")
-            return self.response(context, "Avisame cuando lo termines.", sentiment=sentiment)
+            return self.response(context, message_store.get_message("borrar_nav_ask_finished_text", default="Avisame cuando lo termines."), sentiment=sentiment)
 
         if step == "esperando_confirmacion":
             if user_text.startswith("button_"):
@@ -1477,23 +1415,23 @@ class EstadoBorrarNavegacion(FlowState):
                     if flujo == "registro":
                         return self.response(
                             context,
-                            f"Ingresá de nuevo, hacé click en registro, ingresá tu mail y usá este {code}.",
+                            f"{message_store.get_message('borrar_nav_registro_code_text', default='Ingresá de nuevo, hacé click en registro, ingresá tu mail y usá este código:')} {code}.",
                             sentiment=sentiment,
                         )
-                    return self.response(context, "Perfecto. Probá de nuevo y contame si funcionó.", sentiment=sentiment)
+                    return self.response(context, message_store.get_message("borrar_nav_try_again_text", default="Perfecto. Probá de nuevo y contame si funcionó."), sentiment=sentiment)
 
             answer = parse_yes_no(user_text)
             if answer is not True:
-                return self.response(context, "Cuando termines, avisame y seguimos.", sentiment=sentiment)
+                return self.response(context, message_store.get_message("borrar_nav_wait_again_text", default="Cuando termines, avisame y seguimos."), sentiment=sentiment)
 
             context.set_var("clear_nav_step", "finalizado")
             if flujo == "registro":
                 return self.response(
                     context,
-                    f"Ingresá de nuevo, hacé click en registro, ingresá tu mail y usá este {code}.",
+                    f"{message_store.get_message('borrar_nav_registro_code_text', default='Ingresá de nuevo, hacé click en registro, ingresá tu mail y usá este código:')} {code}.",
                     sentiment=sentiment,
                 )
-            return self.response(context, "Perfecto. Probá de nuevo y contame si funcionó.", sentiment=sentiment)
+            return self.response(context, message_store.get_message("borrar_nav_try_again_text", default="Perfecto. Probá de nuevo y contame si funcionó."), sentiment=sentiment)
 
         if step == "finalizado":
             if user_text.startswith("button_"):
@@ -1501,15 +1439,13 @@ class EstadoBorrarNavegacion(FlowState):
                 if button_id == "funciono":
                     return _set_state_and_reply(
                         context,
-                        "EstadoConsultaAdicional",
-                        "Perfecto, te ayudo con algo más?",
+                        "EstadoConsultaAdicional",message_store.get_message("follow_up_help_text", default="Perfecto, te ayudo con algo más?"),
                         sentiment=sentiment,
                     )
                 elif button_id == "no_funciono":
                     return _set_state_and_reply(
                         context,
-                        "EstadoSoporte",
-                        "Perdón, no estoy pudiendo resolver esto desde acá. Te voy a derivar con una persona más calificada que lo resuelva con vos. 🤝",
+                        "EstadoSoporte",message_store.get_message("handoff_text", default="Perdón, no estoy pudiendo resolver esto desde acá. Te voy a derivar con una persona más calificada que lo resuelva con vos. 🤝"),
                         sentiment=sentiment,
                         handoff=True,
                     )
@@ -1518,21 +1454,19 @@ class EstadoBorrarNavegacion(FlowState):
             if answer is True or looks_like_positive_closure(user_text):
                 return _set_state_and_reply(
                     context,
-                    "EstadoConsultaAdicional",
-                    "Perfecto, te ayudo con algo más?",
+                    "EstadoConsultaAdicional",message_store.get_message("follow_up_help_text", default="Perfecto, te ayudo con algo más?"),
                     sentiment=sentiment,
                 )
             if answer is False or looks_like_negative_outcome(user_text):
                 return _set_state_and_reply(
                     context,
-                    "EstadoSoporte",
-                    "Perdón, no estoy pudiendo resolver esto desde acá. Te voy a derivar con una persona más calificada que lo resuelva con vos. 🤝",
+                    "EstadoSoporte",message_store.get_message("handoff_text", default="Perdón, no estoy pudiendo resolver esto desde acá. Te voy a derivar con una persona más calificada que lo resuelva con vos. 🤝"),
                     sentiment=sentiment,
                     handoff=True,
                 )
-            return self.response(context, "Perfecto. Probá de nuevo y contame si funcionó.", sentiment=sentiment)
+            return self.response(context, message_store.get_message("borrar_nav_try_again_text", default="Perfecto. Probá de nuevo y contame si funcionó."), sentiment=sentiment)
 
-        return self.response(context, "Ya te indiqué los pasos para borrar navegación.", sentiment=sentiment)
+        return self.response(context, message_store.get_message("borrar_nav_steps_done_text", default="Ya te indiqué los pasos para borrar navegación."), sentiment=sentiment)
 
 
 @StateFactory.register("EstadoSoporte")
@@ -1542,7 +1476,7 @@ class EstadoSoporte(FlowState):
 
     def get_buttons(self, context: FlowContext) -> List[Button]:
         return [
-            Button("volver", "Volver al inicio"),
+            Button("volver", message_store.get_message("volver_inicio_button", default="Volver al inicio")),
         ]
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
@@ -1559,8 +1493,7 @@ class EstadoSoporte(FlowState):
                 )
 
         return self.response(
-            context,
-            "Perdón, no estoy pudiendo solucionar tu problema. Te voy a derivar con una persona más calificada que te va a ayudar. 🤝",
+            context,message_store.get_message("soporte_handoff_text", default="Perdón, no estoy pudiendo solucionar tu problema. Te voy a derivar con una persona más calificada que te va a ayudar. 🤝"),
             sentiment=sentiment,
             handoff=True,
         )

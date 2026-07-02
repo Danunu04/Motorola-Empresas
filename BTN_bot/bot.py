@@ -18,8 +18,9 @@ Endpoints:
 - GET  /handoff/sessions - Get handoff sessions
 - POST /resume      - Resume bot after handoff
 - GET  /flow/states - Get registered flow states
-- GET  /chatlog/download - Descarga de conversaciones por rango de fechas (csv/json/pdf)
+- GET  /chatlog/download - Descarga de conversaciones por rango de fechas y session_id opcional (csv/json/pdf/txt)
 - GET  /messages    - Listar mensajes editables del bot
+- POST /messages    - Crear un nuevo mensaje editable
 - PUT  /messages/{message_key} - Actualizar el contenido de un mensaje editable
 - POST /messages/{message_key}/reset - Restaurar un mensaje editable a su valor por defecto
 """
@@ -390,7 +391,9 @@ def _parse_date_param(value: str, name: str) -> date:
         raise HTTPException(status_code=422, detail=f"'{name}' debe tener formato YYYY-MM-DD")
 
 
-def _filter_chat_log_by_range(logs: List[Dict[str, Any]], start: date, end: date) -> List[Dict[str, Any]]:
+def _filter_chat_log_by_range(
+    logs: List[Dict[str, Any]], start: date, end: date, session_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
     result = []
     for record in logs:
         timestamp = record.get("timestamp")
@@ -400,25 +403,34 @@ def _filter_chat_log_by_range(logs: List[Dict[str, Any]], start: date, end: date
             record_date = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00")).date()
         except ValueError:
             continue
-        if start <= record_date <= end:
-            result.append(record)
+        if not (start <= record_date <= end):
+            continue
+        if session_id and str(record.get("session_id", "")) != session_id:
+            continue
+        result.append(record)
     return result
 
 
-def _read_chat_log_bigquery_range(start: date, end: date) -> List[Dict[str, Any]]:
+def _read_chat_log_bigquery_range(
+    start: date, end: date, session_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
     client = _get_bigquery_client()
+    where_clauses = ["DATE(timestamp) BETWEEN @start AND @end"]
+    query_parameters = [
+        bigquery.ScalarQueryParameter("start", "DATE", start),
+        bigquery.ScalarQueryParameter("end", "DATE", end),
+    ]
+    if session_id:
+        where_clauses.append("session_id = @session_id")
+        query_parameters.append(bigquery.ScalarQueryParameter("session_id", "STRING", session_id))
+
     query = f"""
         SELECT timestamp, session_id, question, answer, channel, environment
         FROM `{_get_bigquery_table_id()}`
-        WHERE DATE(timestamp) BETWEEN @start AND @end
+        WHERE {' AND '.join(where_clauses)}
         ORDER BY timestamp ASC
     """
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("start", "DATE", start),
-            bigquery.ScalarQueryParameter("end", "DATE", end),
-        ]
-    )
+    job_config = bigquery.QueryJobConfig(query_parameters=query_parameters)
     rows = client.query(query, job_config=job_config).result()
     logs = []
     for row in rows:
@@ -461,6 +473,28 @@ def _build_chatlog_pdf(logs: List[Dict[str, Any]], start: date, end: date) -> by
 
     doc.build([header, Spacer(1, 12), table])
     return buf.getvalue()
+
+
+def _build_chatlog_txt(logs: List[Dict[str, Any]]) -> str:
+    from collections import OrderedDict
+
+    grouped: OrderedDict[str, List[Dict[str, Any]]] = OrderedDict()
+    for record in logs:
+        session_id = str(record.get("session_id") or "")
+        grouped.setdefault(session_id, []).append(record)
+
+    lines = []
+    for index, (session_id, records) in enumerate(grouped.items(), start=1):
+        lines.append(f"Chat {index}: {session_id}")
+        lines.append("-" * max(20, len(session_id) + 8))
+        for record in records:
+            question = str(record.get("question") or "")
+            answer = str(record.get("answer") or "")
+            lines.append(f"Pregunta: {question}")
+            lines.append(f"Respuesta: {answer}")
+            lines.append("")
+
+    return "\n".join(lines)
 
 
 def _append_chat_log(session_id: str, question: str, answer: str) -> None:
@@ -641,6 +675,22 @@ class MessageUpdateRequest(BaseModel):
 
 class MessageResetBody(BaseModel):
     updated_by: str = ""
+
+
+class MessageCreateRequest(BaseModel):
+    message_key: str
+    message_type: str
+    state_name: Optional[str] = None
+    flujo_identificacion_mensaje: Optional[str] = None
+    label: Optional[str] = None
+    content: str
+    default_content: Optional[str] = None
+    updated_by: str = ""
+    orden: Optional[int] = None
+
+
+class MessageReorderRequest(BaseModel):
+    orders: List[Dict[str, Any]]
 
 
 # ==============================
@@ -1120,6 +1170,7 @@ def download_chat_log(
     from_: Optional[str] = Query(None, alias="from"),
     to: Optional[str] = Query(None),
     format: str = Query("csv"),
+    session_id: Optional[str] = Query(None),
 ):
     if not from_ or not to:
         raise HTTPException(status_code=422, detail="Los parámetros 'from' y 'to' son obligatorios")
@@ -1130,20 +1181,23 @@ def download_chat_log(
     if start > end:
         raise HTTPException(status_code=400, detail="'from' no puede ser posterior a 'to'")
 
-    if (end - start).days > 89:
-        raise HTTPException(status_code=400, detail="El rango máximo permitido es de 90 días")
-
     fmt = format.lower()
-    if fmt not in {"csv", "json", "pdf"}:
-        raise HTTPException(status_code=422, detail="'format' debe ser csv, json o pdf")
+    if fmt not in {"csv", "json", "pdf", "txt"}:
+        raise HTTPException(status_code=422, detail="'format' debe ser csv, json, pdf o txt")
+
+    if fmt == "txt" and not _should_use_bigquery_chat_log():
+        raise HTTPException(
+            status_code=503,
+            detail="BigQuery no está configurado; la exportación .txt requiere la tabla chat_history",
+        )
 
     if _should_use_bigquery_chat_log():
         try:
-            logs = _read_chat_log_bigquery_range(start, end)
+            logs = _read_chat_log_bigquery_range(start, end, session_id=session_id)
         except (RuntimeError, Exception) as e:
             raise HTTPException(status_code=503, detail=f"No se pudo leer chatlog desde BigQuery: {e}")
     else:
-        logs = _filter_chat_log_by_range(_load_chat_log(), start, end)
+        logs = _filter_chat_log_by_range(_load_chat_log(), start, end, session_id=session_id)
 
     if not logs:
         raise HTTPException(status_code=404, detail="No hay conversaciones en el rango solicitado")
@@ -1167,6 +1221,14 @@ def download_chat_log(
             content=buf.getvalue(),
             media_type="text/csv",
             headers={"Content-Disposition": f'attachment; filename="{filename_base}.csv"'},
+        )
+
+    if fmt == "txt":
+        txt_content = _build_chatlog_txt(logs)
+        return Response(
+            content=txt_content,
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename_base}.txt"'},
         )
 
     pdf_bytes = _build_chatlog_pdf(logs, start, end)
@@ -1221,6 +1283,60 @@ def reset_message(message_key: str, req: MessageResetBody):
 
     logger.info(f"[messages] {message_key} restaurado a default por {req.updated_by}")
     return {"ok": True, "message_key": message_key}
+
+
+@app.post("/messages")
+def create_message(req: MessageCreateRequest):
+    if message_store.get_message_metadata(req.message_key) is not None:
+        raise HTTPException(status_code=409, detail="message_key ya existe")
+
+    content = req.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="content vacío")
+
+    if req.message_type not in message_store.MESSAGE_LIMITS:
+        raise HTTPException(status_code=422, detail=f"message_type '{req.message_type}' no es válido")
+
+    limit = message_store.MESSAGE_LIMITS.get(req.message_type)
+    if limit and len(content) > limit:
+        raise HTTPException(
+            status_code=422,
+            detail=f"content excede el límite de {limit} caracteres para {req.message_type}",
+        )
+
+    try:
+        message_store.create_message(
+            message_key=req.message_key,
+            message_type=req.message_type,
+            state_name=req.state_name,
+            flujo_identificacion_mensaje=req.flujo_identificacion_mensaje,
+            label=req.label,
+            content=content,
+            default_content=req.default_content,
+            updated_by=req.updated_by,
+            orden=req.orden,
+        )
+    except (RuntimeError, ValueError) as e:
+        raise HTTPException(status_code=503, detail=f"No se pudo crear el mensaje: {e}")
+
+    logger.info(f"[messages] {req.message_key} creado por {req.updated_by}")
+    return {"ok": True, "message_key": req.message_key}
+
+
+@app.patch("/messages/reorder")
+def reorder_messages(req: MessageReorderRequest):
+    if not req.orders:
+        return {"ok": True, "updated": 0}
+
+    try:
+        message_store.update_message_order(req.orders)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=f"BigQuery no disponible para reordenar: {e}")
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=f"message_key no registrada: {e}")
+
+    logger.info(f"[messages] reordenados {len(req.orders)} mensajes")
+    return {"ok": True, "updated": len(req.orders)}
 
 
 class AgentSendRequest(BaseModel):
