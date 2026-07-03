@@ -26,10 +26,16 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "current_buttons" not in st.session_state:
     st.session_state.current_buttons = []
+if "current_interactive_type" not in st.session_state:
+    st.session_state.current_interactive_type = None
+if "current_list_config" not in st.session_state:
+    st.session_state.current_list_config = None
 if "waiting_for_email" not in st.session_state:
     st.session_state.waiting_for_email = False
 if "button_counter" not in st.session_state:
     st.session_state.button_counter = 0
+if "input_key_seq" not in st.session_state:
+    st.session_state.input_key_seq = 0
 
 
 def send_message(text: str) -> dict:
@@ -65,36 +71,45 @@ def reset_session():
         pass
     st.session_state.messages = []
     st.session_state.current_buttons = []
+    st.session_state.current_interactive_type = None
+    st.session_state.current_list_config = None
     st.session_state.waiting_for_email = False
 
 
-def add_message(role: str, content: str, buttons: list = None):
+def add_message(role: str, content: str, buttons: list = None, interactive_type: str = None, list_config: dict = None):
     """Agrega un mensaje al historial."""
     st.session_state.messages.append({
         "role": role,
         "content": content,
         "buttons": buttons or [],
+        "interactive_type": interactive_type,
+        "list_config": list_config,
     })
 
 
 def handle_button_click(button_id: str, button_title: str):
-    """Maneja el clic en un botón."""
-    # Marcar los botones actuales como ya mostrados (para no renderizarlos de nuevo)
+    """Maneja el clic en un botón o en una fila de lista."""
+    # Marcar las opciones actuales como ya mostradas (para no renderizarlas de nuevo)
     st.session_state.current_buttons = []
+    st.session_state.current_list_config = None
     st.session_state.button_counter += 1
 
     # Mostrar el botón clickeado como mensaje del usuario
     add_message("user", f"🔘 {button_title}")
 
-    # Enviar como button_id al bot
+    # Enviar como button_id al bot (también usado para filas de lista, ver diagnóstico)
     text = f"button_{button_id}"
     response = send_message(text)
 
     answer = response.get("answer", "")
     buttons = response.get("buttons")
+    interactive_type = response.get("interactive_type")
+    list_config = response.get("list_config")
 
-    add_message("bot", answer, buttons)
+    add_message("bot", answer, buttons, interactive_type, list_config)
     st.session_state.current_buttons = buttons or []
+    st.session_state.current_interactive_type = interactive_type
+    st.session_state.current_list_config = list_config
     st.session_state.waiting_for_email = False
 
     # Si la respuesta pide un email, activar el input de texto
@@ -103,8 +118,9 @@ def handle_button_click(button_id: str, button_title: str):
 
 
 def handle_text_submit():
-    """Maneja el envío de texto del usuario."""
-    text = st.session_state.text_input_value
+    """Maneja el envío de texto del usuario (disparado por Enter o por el botón Enviar)."""
+    input_key = f"text_input_{st.session_state.input_key_seq}"
+    text = st.session_state.get(input_key, "")
     if not text or not text.strip():
         return
 
@@ -113,16 +129,24 @@ def handle_text_submit():
 
     answer = response.get("answer", "")
     buttons = response.get("buttons")
+    interactive_type = response.get("interactive_type")
+    list_config = response.get("list_config")
 
-    add_message("bot", answer, buttons)
+    add_message("bot", answer, buttons, interactive_type, list_config)
     st.session_state.current_buttons = buttons or []
+    st.session_state.current_interactive_type = interactive_type
+    st.session_state.current_list_config = list_config
     st.session_state.waiting_for_email = False
 
     # Si la respuesta pide un email, activar el input de texto
     if "mail" in answer.lower() or "email" in answer.lower() or "correo" in answer.lower():
         st.session_state.waiting_for_email = True
 
-    st.session_state.text_input_value = ""
+    # Nueva key -> Streamlit monta un text_input vacío en el próximo render.
+    # También sirve de guarda: si "Enviar" vuelve a llamar a este handler en el
+    # mismo run (porque el blur ya disparó on_change), la key ya avanzó y el
+    # widget correspondiente está vacío, así que el guard de arriba corta ahí.
+    st.session_state.input_key_seq += 1
 
 
 # ==============================
@@ -144,15 +168,20 @@ if not st.session_state.messages:
     response = send_message("hola")
     answer = response.get("answer", "")
     buttons = response.get("buttons")
-    add_message("bot", answer, buttons)
+    interactive_type = response.get("interactive_type")
+    list_config = response.get("list_config")
+    add_message("bot", answer, buttons, interactive_type, list_config)
     st.session_state.current_buttons = buttons or []
+    st.session_state.current_interactive_type = interactive_type
+    st.session_state.current_list_config = list_config
 
 # Mostrar historial de mensajes
 for idx, msg in enumerate(st.session_state.messages):
+    has_interactive = bool(st.session_state.current_buttons) or bool(st.session_state.current_list_config)
     is_last_bot = (
         msg["role"] != "user"
         and idx == len(st.session_state.messages) - 1
-        and st.session_state.current_buttons
+        and has_interactive
     )
     if msg["role"] == "user":
         with st.chat_message("user"):
@@ -160,30 +189,53 @@ for idx, msg in enumerate(st.session_state.messages):
     else:
         with st.chat_message("assistant"):
             st.write(msg["content"])
-            # Mostrar botones debajo del último mensaje del bot
+            # Mostrar opciones (botones o lista) debajo del último mensaje del bot
             if is_last_bot:
-                buttons = st.session_state.current_buttons
-                button_list = []
-                for b in buttons:
-                    reply = b.get("reply", {})
-                    button_id = reply.get("id", "")
-                    title = reply.get("title", "")
-                    button_list.append((button_id, title))
+                if st.session_state.current_interactive_type == "list" and st.session_state.current_list_config:
+                    list_config = st.session_state.current_list_config
+                    button_text = list_config.get("button_text")
+                    if button_text:
+                        st.caption(f"📋 {button_text}")
 
-                # Mostrar botones en columnas de a 3
-                for i in range(0, len(button_list), 3):
-                    cols = st.columns(min(3, len(button_list) - i))
-                    for j, col in enumerate(cols):
-                        if i + j < len(button_list):
-                            btn_id, btn_title = button_list[i + j]
-                            with col:
-                                if st.button(
-                                    btn_title,
-                                    key=f"btn_{btn_id}_{st.session_state.button_counter}_{i}_{j}",
-                                    use_container_width=True,
-                                ):
-                                    handle_button_click(btn_id, btn_title)
-                                    st.rerun()
+                    for section in list_config.get("sections", []):
+                        section_title = section.get("title")
+                        if section_title:
+                            st.markdown(f"**{section_title}**")
+                        for row in section.get("rows", []):
+                            row_id = row.get("id", "")
+                            row_title = row.get("title", "")
+                            row_desc = row.get("description") or None
+                            if st.button(
+                                row_title,
+                                key=f"row_{row_id}_{st.session_state.button_counter}",
+                                use_container_width=True,
+                                help=row_desc,
+                            ):
+                                handle_button_click(row_id, row_title)
+                                st.rerun()
+                else:
+                    buttons = st.session_state.current_buttons
+                    button_list = []
+                    for b in buttons:
+                        reply = b.get("reply", {})
+                        button_id = reply.get("id", "")
+                        title = reply.get("title", "")
+                        button_list.append((button_id, title))
+
+                    # Mostrar botones en columnas de a 3
+                    for i in range(0, len(button_list), 3):
+                        cols = st.columns(min(3, len(button_list) - i))
+                        for j, col in enumerate(cols):
+                            if i + j < len(button_list):
+                                btn_id, btn_title = button_list[i + j]
+                                with col:
+                                    if st.button(
+                                        btn_title,
+                                        key=f"btn_{btn_id}_{st.session_state.button_counter}_{i}_{j}",
+                                        use_container_width=True,
+                                    ):
+                                        handle_button_click(btn_id, btn_title)
+                                        st.rerun()
 
 # Input de texto (siempre visible, útil para emails)
 st.markdown("---")
@@ -192,7 +244,7 @@ text_col, send_col = st.columns([4, 1])
 with text_col:
     st.text_input(
         "Escribí un mensaje" if not st.session_state.waiting_for_email else "Ingresá tu email",
-        key="text_input_value",
+        key=f"text_input_{st.session_state.input_key_seq}",
         on_change=handle_text_submit,
         placeholder="Escribí tu email o mensaje...",
     )
