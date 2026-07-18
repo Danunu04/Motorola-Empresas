@@ -130,5 +130,6 @@ class TestMessageLimits:
             "list_row_title": 24,
             "list_row_description": 72,
             "text": 2000,
-            "button_text": 2000,
+            "button_text": 20,
+            "list_section_title": 24,
         }

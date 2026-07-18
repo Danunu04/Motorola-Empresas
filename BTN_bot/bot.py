@@ -23,6 +23,7 @@ Endpoints:
 - POST /messages    - Crear un nuevo mensaje editable
 - PUT  /messages/{message_key} - Actualizar el contenido de un mensaje editable
 - POST /messages/{message_key}/reset - Restaurar un mensaje editable a su valor por defecto
+- GET/POST/PUT/DELETE /options - Administrar opciones y configuración de grupos
 """
 
 import os
@@ -43,7 +44,7 @@ from pathlib import Path
 from starlette.concurrency import run_in_threadpool
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from dotenv import load_dotenv
 
 import message_store
@@ -518,7 +519,7 @@ def _append_chat_log(session_id: str, question: str, answer: str) -> None:
             CHAT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(CHAT_LOG_PATH, "w", encoding="utf-8") as f:
                 json.dump(logs, f, ensure_ascii=False, indent=2)
-    except (OSError, json.JSONEncodeError) as e:
+    except (OSError, json.JSONDecodeError) as e:
         logger.error(f"[chat-log] error: {e}")
 
 
@@ -691,6 +692,49 @@ class MessageCreateRequest(BaseModel):
 
 class MessageReorderRequest(BaseModel):
     orders: List[Dict[str, Any]]
+
+
+class OptionCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    option_id: str = Field(..., min_length=1)
+    orden: int = Field(..., ge=0)
+    title_key: str = Field(..., min_length=1)
+    button_title_key: Optional[str] = None
+    description_key: Optional[str] = None
+    target_state: Optional[str] = None
+    target_vars: Optional[Any] = None
+    stay_in_state: bool = False
+    target_substep_key: Optional[str] = None
+    target_substep_value: Optional[str] = None
+    reply_key: Optional[str] = None
+    extra_flags: Optional[Any] = None
+    updated_by: str = ""
+
+
+class OptionUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    orden: Optional[int] = Field(default=None, ge=0)
+    title_key: Optional[str] = None
+    button_title_key: Optional[str] = None
+    description_key: Optional[str] = None
+    target_state: Optional[str] = None
+    target_vars: Optional[Any] = None
+    stay_in_state: Optional[bool] = None
+    target_substep_key: Optional[str] = None
+    target_substep_value: Optional[str] = None
+    reply_key: Optional[str] = None
+    extra_flags: Optional[Any] = None
+    updated_by: str = ""
+
+
+class OptionGroupConfigRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    button_text_key: str = Field(..., min_length=1)
+    section_title_key: str = Field(..., min_length=1)
+    updated_by: str = ""
 
 
 # ==============================
@@ -1237,6 +1281,179 @@ def download_chat_log(
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename_base}.pdf"'},
     )
+
+
+def _normalized_option_path(value: str, field_name: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=422, detail=f"{field_name} vacío")
+    return normalized
+
+
+def _validate_option_target_state(target_state: Optional[str]) -> None:
+    if target_state and target_state not in StateFactory.get_registered_states():
+        raise HTTPException(
+            status_code=422,
+            detail=f"target_state '{target_state}' no es un FlowState registrado",
+        )
+
+
+def _option_group_payload(option_group: str) -> Dict[str, Any]:
+    options = message_store.get_option_set(option_group)
+    option_count = len(options)
+    return {
+        "ok": True,
+        "option_group": option_group,
+        "option_count": option_count,
+        "interactive_type": (
+            "list" if option_count >= 4 else ("button" if option_count >= 1 else None)
+        ),
+        "options": options,
+    }
+
+
+# Las rutas estáticas /options/groups deben declararse antes de /options/{option_group}.
+@app.get("/options/groups")
+def list_option_groups():
+    return {"ok": True, "groups": message_store.get_option_groups()}
+
+
+@app.get("/options/groups/{option_group}/config")
+def get_option_group_config(option_group: str):
+    option_group = _normalized_option_path(option_group, "option_group")
+    return {
+        "ok": True,
+        "config": message_store.get_option_group_config(option_group),
+    }
+
+
+@app.put("/options/groups/{option_group}/config")
+def update_option_group_config(option_group: str, req: OptionGroupConfigRequest):
+    option_group = _normalized_option_path(option_group, "option_group")
+    try:
+        message_store.set_option_group_config(
+            option_group,
+            req.button_text_key,
+            req.section_title_key,
+            updated_by=req.updated_by,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"BigQuery no disponible para guardar la configuración: {exc}",
+        ) from exc
+
+    logger.info(f"[options] configuración de {option_group} actualizada por {req.updated_by}")
+    return {
+        "ok": True,
+        "config": message_store.get_option_group_config(option_group),
+    }
+
+
+@app.get("/options/{option_group}")
+def list_group_options(option_group: str):
+    option_group = _normalized_option_path(option_group, "option_group")
+    return _option_group_payload(option_group)
+
+
+@app.post("/options/{option_group}", status_code=201)
+def create_group_option(option_group: str, req: OptionCreateRequest):
+    option_group = _normalized_option_path(option_group, "option_group")
+    option_id = _normalized_option_path(req.option_id, "option_id")
+    _validate_option_target_state(req.target_state)
+    try:
+        message_store.create_option_binding(
+            option_group,
+            option_id,
+            req.orden,
+            req.title_key,
+            button_title_key=req.button_title_key,
+            description_key=req.description_key,
+            target_state=req.target_state,
+            target_vars=req.target_vars,
+            stay_in_state=req.stay_in_state,
+            target_substep_key=req.target_substep_key,
+            target_substep_value=req.target_substep_value,
+            reply_key=req.reply_key,
+            extra_flags=req.extra_flags,
+            updated_by=req.updated_by,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        conflict = any(
+            marker in detail
+            for marker in ("ya existe", "superar 10 opciones", "supero 10 opciones")
+        )
+        raise HTTPException(status_code=409 if conflict else 422, detail=detail) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"BigQuery no disponible para crear la opción: {exc}",
+        ) from exc
+
+    logger.info(f"[options] {option_group}/{option_id} creada por {req.updated_by}")
+    return _option_group_payload(option_group)
+
+
+@app.put("/options/{option_group}/{option_id}")
+def update_group_option(option_group: str, option_id: str, req: OptionUpdateRequest):
+    option_group = _normalized_option_path(option_group, "option_group")
+    option_id = _normalized_option_path(option_id, "option_id")
+    changes = req.model_dump(exclude_unset=True)
+    changes.pop("updated_by", None)
+    if not changes:
+        raise HTTPException(status_code=422, detail="no se indicaron campos para actualizar")
+    if "target_state" in changes:
+        _validate_option_target_state(changes["target_state"])
+    try:
+        message_store.update_option_binding(
+            option_group,
+            option_id,
+            updated_by=req.updated_by,
+            **changes,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="opción no registrada") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"BigQuery no disponible para actualizar la opción: {exc}",
+        ) from exc
+
+    logger.info(f"[options] {option_group}/{option_id} actualizada por {req.updated_by}")
+    return _option_group_payload(option_group)
+
+
+@app.delete("/options/{option_group}/{option_id}")
+def delete_group_option(
+    option_group: str,
+    option_id: str,
+    updated_by: str = Query(default=""),
+):
+    option_group = _normalized_option_path(option_group, "option_group")
+    option_id = _normalized_option_path(option_id, "option_id")
+    try:
+        message_store.delete_option_binding(
+            option_group,
+            option_id,
+            updated_by=updated_by,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="opción no registrada") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"BigQuery no disponible para eliminar la opción: {exc}",
+        ) from exc
+
+    logger.info(f"[options] {option_group}/{option_id} eliminada por {updated_by}")
+    return _option_group_payload(option_group)
 
 
 @app.get("/messages")

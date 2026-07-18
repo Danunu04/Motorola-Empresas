@@ -6,6 +6,8 @@ El usuario navega exclusivamente haciendo clic en botones, excepto
 cuando debe ingresar un email (texto libre).
 """
 
+import json
+import logging
 import re
 import threading
 import uuid
@@ -16,6 +18,8 @@ from typing import Any, Dict, List, Optional
 
 import message_store
 
+
+logger = logging.getLogger(__name__)
 
 EMAIL_RE = re.compile(r"[\w\.\-\+]+@[\w\.\-]+\.\w+", re.I)
 GENERIC_MAIL_RE = re.compile(r"@(gmail|hotmail|outlook|live|yahoo)\.", re.I)
@@ -285,6 +289,87 @@ class ListRow:
         return row
 
 
+class OptionGroupRenderError(ValueError):
+    """Indica que un grupo no puede representarse con interactivos de WhatsApp."""
+
+
+class OptionRoutingError(ValueError):
+    """Indica que una opción dinámica tiene una configuración de ruteo inválida."""
+
+
+@dataclass
+class RenderedOptionGroup:
+    """Resultado del render automático de un ``option_group``."""
+
+    interactive_type: str
+    buttons: List[Button] = field(default_factory=list)
+    list_config: Optional[Dict[str, Any]] = None
+
+
+def render_option_group(option_group: str) -> RenderedOptionGroup:
+    """Renderiza 1-3 opciones como botones y 4-10 como una lista.
+
+    El tipo interactivo se deriva siempre de la cantidad de opciones activas; no
+    existe una configuración persistida que permita forzar botones o lista.
+    """
+    options = message_store.get_option_set(option_group)
+    option_count = len(options)
+
+    if not 1 <= option_count <= 10:
+        raise OptionGroupRenderError(
+            f"El grupo '{option_group}' tiene {option_count} opciones activas; "
+            "WhatsApp requiere entre 1 y 10."
+        )
+
+    if option_count <= 3:
+        return RenderedOptionGroup(
+            interactive_type="button",
+            buttons=[
+                Button(option["option_id"], option["button_title"])
+                for option in options
+            ],
+        )
+
+    config = message_store.get_option_group_config(option_group)
+    return RenderedOptionGroup(
+        interactive_type="list",
+        list_config={
+            "button_text": config["button_text"],
+            "sections": [
+                {
+                    "title": config["section_title"],
+                    "rows": [
+                        ListRow(
+                            option["option_id"],
+                            option["title"],
+                            option.get("description") or "",
+                        )
+                        for option in options
+                    ],
+                }
+            ],
+        },
+    )
+
+
+def _parse_option_json(raw_value: Any, field_name: str, option_group: str, option_id: str) -> Dict[str, Any]:
+    if not raw_value:
+        return {}
+    if isinstance(raw_value, dict):
+        return dict(raw_value)
+    try:
+        parsed = json.loads(raw_value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise OptionRoutingError(
+            f"{option_group}/{option_id}: {field_name} no contiene JSON válido"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise OptionRoutingError(
+            f"{option_group}/{option_id}: {field_name} debe contener un objeto JSON"
+        )
+    return parsed
+
+
 class FlowState(ABC):
     def __init__(self, state_name: str):
         self.state_name = state_name
@@ -320,11 +405,118 @@ class FlowState(ABC):
         """
         return None
 
+    def get_option_group(self, context: "FlowContext") -> Optional[str]:
+        """Retorna el grupo dinámico del estado; None conserva el render legado."""
+        return None
+
+    def handle_dynamic_option_override(
+        self,
+        context: "FlowContext",
+        option_group: str,
+        option: Dict[str, Any],
+        sentiment: str,
+        extra: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Hook para las pocas respuestas que deliberadamente siguen en código."""
+        return None
+
+    def route_dynamic_option(
+        self,
+        context: "FlowContext",
+        user_text: str,
+        sentiment: str = "neutral",
+    ) -> Optional[Dict[str, Any]]:
+        """Resuelve una selección usando el binding activo del grupo del estado."""
+        option_group = self.get_option_group(context)
+        if not option_group or not user_text.startswith("button_"):
+            return None
+
+        option_id = user_text[len("button_"):]
+        option = message_store.get_option_by_id(option_group, option_id)
+        if option is None:
+            # La opción pudo eliminarse después de haber sido enviada al usuario.
+            return _set_state_and_reply(
+                context,
+                "EstadoSoporte",
+                reply=message_store.get_message(
+                    "handoff_text",
+                    default="Perdón, esa opción ya no está disponible. Te voy a derivar con soporte.",
+                ),
+                sentiment=sentiment,
+                handoff=True,
+            )
+
+        context.update_vars(
+            _parse_option_json(option.get("target_vars"), "target_vars", option_group, option_id)
+        )
+        extra = _parse_option_json(
+            option.get("extra_flags"), "extra_flags", option_group, option_id
+        )
+
+        if option.get("stay_in_state"):
+            substep_key = option.get("target_substep_key")
+            substep_value = option.get("target_substep_value")
+            if not substep_key or substep_value is None:
+                raise OptionRoutingError(
+                    f"{option_group}/{option_id}: faltan target_substep_key/target_substep_value"
+                )
+            context.set_var(substep_key, substep_value)
+
+            overridden = self.handle_dynamic_option_override(
+                context, option_group, option, sentiment, extra
+            )
+            if overridden is not None:
+                return overridden
+
+            reply_key = option.get("reply_key")
+            if not reply_key:
+                raise OptionRoutingError(
+                    f"{option_group}/{option_id}: reply_key es obligatorio para stay_in_state"
+                )
+            return self.response(
+                context,
+                message_store.get_message(reply_key),
+                sentiment=sentiment,
+                **extra,
+            )
+
+        target_state = option.get("target_state") or "EstadoSoporte"
+        reply_key = option.get("reply_key")
+        reply = message_store.get_message(reply_key) if reply_key else None
+        if target_state not in StateFactory.get_registered_states():
+            logger.error(
+                "[options] target_state inválido en %s/%s: %s; se deriva a soporte",
+                option_group,
+                option_id,
+                target_state,
+            )
+            target_state = "EstadoSoporte"
+        if target_state == "EstadoSoporte":
+            reply = reply or message_store.get_message(
+                "handoff_text",
+                default="Perdón, no estoy pudiendo resolver esto desde acá. Te voy a derivar con soporte.",
+            )
+            extra["handoff"] = True
+        return _set_state_and_reply(
+            context,
+            target_state,
+            reply=reply,
+            sentiment=sentiment,
+            **extra,
+        )
+
     def response(self, context: "FlowContext", reply: str, sentiment: str = "neutral", **extra: Any) -> Dict[str, Any]:
         reply = make_easy_support_reply(reply)
-        buttons = self.get_buttons(context)
-        interactive_type = self.get_interactive_type(context)
-        list_config = self.get_list_config(context)
+        option_group = self.get_option_group(context)
+        if option_group:
+            rendered = render_option_group(option_group)
+            buttons = rendered.buttons
+            interactive_type = rendered.interactive_type
+            list_config = rendered.list_config
+        else:
+            buttons = self.get_buttons(context)
+            interactive_type = self.get_interactive_type(context)
+            list_config = self.get_list_config(context)
         payload = {
             "mode": "flow",
             "reply": reply,
@@ -489,72 +681,20 @@ WELCOME_MESSAGE = (
 
 @StateFactory.register("EstadoInicial")
 class EstadoInicial(FlowState):
-    """Menú principal con List Message (4 opciones, >3 botones)."""
+    """Menú principal con formato automático según sus opciones activas."""
 
     def prompt(self, context: FlowContext) -> str:
         return message_store.get_message("welcome_message", default=WELCOME_MESSAGE)
 
-    def get_interactive_type(self, context: FlowContext) -> str:
-        return "list"
-
-    def get_list_config(self, context: FlowContext) -> Optional[Dict[str, Any]]:
-        return {
-            "button_text": message_store.get_message("main_menu_button_text", default="Ver opciones"),
-            "sections": [
-                {
-                    "title": "¿En qué te puedo ayudar?",
-                    "rows": [
-                        ListRow(
-                            "registro",
-                            message_store.get_message("main_menu_row_registro_title", default="No me puedo registrar"),
-                            message_store.get_message("main_menu_row_registro_description", default="Problemas con el registro"),
-                        ),
-                        ListRow(
-                            "no_veo_precios",
-                            message_store.get_message("main_menu_row_no_veo_precios_title", default="No veo precios"),
-                            message_store.get_message("main_menu_row_no_veo_precios_description", default="No se muestran los precios"),
-                        ),
-                        ListRow(
-                            "no_veo_descuentos",
-                            message_store.get_message("main_menu_row_no_veo_descuentos_title", default="No veo descuentos"),
-                            message_store.get_message("main_menu_row_no_veo_descuentos_description", default="Descuentos no aplicados"),
-                        ),
-                        ListRow(
-                            "info_pedido",
-                            message_store.get_message("main_menu_row_info_pedido_title", default="Info de mi pedido"),
-                            message_store.get_message("main_menu_row_info_pedido_description", default="Consultar estado del pedido"),
-                        ),
-                    ]
-                }
-            ]
-        }
-
-    def get_buttons(self, context: FlowContext) -> List[Button]:
-        return []
+    def get_option_group(self, context: FlowContext) -> Optional[str]:
+        return "menu_principal"
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
         sentiment = detect_sentiment_basic(user_text)
 
-        # Manejar respuesta de botón
-        if user_text.startswith("button_"):
-            button_id = user_text.replace("button_", "")
-            context.set_var("intentos_identificacion", 0)
-            context.set_var("opcion_inicial", button_id)
-
-            if button_id == "registro":
-                context.set_var("flujo", "registro")
-                return _set_state_and_reply(context, "EstadoPreFlujo", sentiment=sentiment)
-
-            elif button_id == "no_veo_precios":
-                context.set_var("flujo", "precios")
-                return _set_state_and_reply(context, "EstadoPreFlujo", sentiment=sentiment)
-
-            elif button_id == "no_veo_descuentos":
-                context.set_var("flujo", "descuentos")
-                return _set_state_and_reply(context, "EstadoPreFlujo", sentiment=sentiment)
-
-            elif button_id == "info_pedido":
-                return _set_state_and_reply(context, "EstadoPreFlujo", sentiment=sentiment)
+        routed = self.route_dynamic_option(context, user_text, sentiment)
+        if routed is not None:
+            return routed
 
         # Fallback para texto libre
         attempts = int(context.get_var("intentos_identificacion", 0)) + 1
@@ -594,6 +734,9 @@ class EstadoPreFlujo(FlowState):
         return message_store.get_message("pre_flujo_message", default=PRE_FLUJO_MESSAGE)
 
     def get_buttons(self, context: FlowContext) -> List[Button]:
+        # Excepción acordada: "continuar" es un mini-router que depende de opcion_inicial y
+        # puede elegir cuatro destinos. Podría migrarse en el futuro si cada continuación se
+        # modela como una opción independiente con un target único.
         return [
             Button(
                 "continuar",
@@ -675,19 +818,17 @@ class EstadoPreFlujo(FlowState):
 class EstadoNoVeoDescuentos(FlowState):
     """Flujo para cuando el usuario no ve los descuentos."""
 
+    def get_option_group(self, context: FlowContext) -> Optional[str]:
+        substep = context.get_var("descuentos_substep", "pregunta_cargaste")
+        return {
+            "pregunta_cargaste": "descuentos_pregunta_cargaste",
+            "pregunta_cuando": "descuentos_pregunta_cuando",
+        }.get(substep)
+
     def get_buttons(self, context: FlowContext) -> List[Button]:
         substep = context.get_var("descuentos_substep", "pregunta_cargaste")
-        if substep == "pregunta_cargaste":
-            return [
-                Button("si", message_store.get_message("generic_si_loaded_button", default="✅ Sí, lo cargué")),
-                Button("no", message_store.get_message("generic_no_loaded_button", default="❌ No lo cargué")),
-            ]
-        elif substep == "pregunta_cuando":
-            return [
-                Button("menos_48", message_store.get_message("generic_menos_48_button", default="Menos de 48hs")),
-                Button("mas_48", message_store.get_message("generic_mas_48_button", default="Más de 48hs")),
-            ]
-        elif substep == "esperando_resultado":
+        if substep == "esperando_resultado":
+            # Dead code conocido: se conserva intacto para revisarlo en una iteración futura.
             return [
                 Button("funciono", message_store.get_message("generic_funciono_button", default="✅ Funcionó")),
                 Button("no_funciono", message_store.get_message("generic_no_funciono_button", default="❌ No funcionó")),
@@ -698,23 +839,11 @@ class EstadoNoVeoDescuentos(FlowState):
         sentiment = detect_sentiment_basic(user_text)
         substep = context.get_var("descuentos_substep", "pregunta_cargaste")
 
-        if substep == "pregunta_cargaste":
-            # Manejar respuesta de botón
-            if user_text.startswith("button_"):
-                button_id = user_text.replace("button_", "")
-                if button_id == "si":
-                    context.set_var("descuentos_substep", "pregunta_cuando")
-                    return self.response(
-                        context,message_store.get_message("ask_when_loaded_text", default="¿Cuándo lo cargaste?"),
-                        sentiment=sentiment,
-                    )
-                elif button_id == "no":
-                    context.set_var("descuentos_substep", "fin")
-                    return self.response(
-                        context,message_store.get_message("descuentos_not_loaded_text", default="Hay un formulario en la publicación del beneficio que tenés que completar. Una vez hecho eso, esperá 48 horas y volvé a intentar. Si seguís sin ver los descuentos, avísame y te derivo con soporte."),
-                        sentiment=sentiment,
-                    )
+        routed = self.route_dynamic_option(context, user_text, sentiment)
+        if routed is not None:
+            return routed
 
+        if substep == "pregunta_cargaste":
             # Fallback texto libre
             if looks_like_form_confusion(user_text):
                 context.set_var("descuentos_substep", "fin")
@@ -740,23 +869,6 @@ class EstadoNoVeoDescuentos(FlowState):
             return self.response(context, message_store.get_message("ask_loaded_form_text", default="Contame si llegaste a cargar el formulario."), sentiment=sentiment)
 
         if substep == "pregunta_cuando":
-            # Manejar respuesta de botón
-            if user_text.startswith("button_"):
-                button_id = user_text.replace("button_", "")
-                if button_id == "menos_48":
-                    context.set_var("descuentos_substep", "fin")
-                    return self.response(
-                        context,message_store.get_message("descuentos_wait_48_text", default="Perfecto. En ese caso hay que esperar 48 horas para que se procese el registro. Una vez que pase ese tiempo, probá de nuevo. 😊"),
-                        sentiment=sentiment,
-                    )
-                elif button_id == "mas_48":
-                    context.set_var("descuentos_substep", "esperando_resultado")
-                    return _set_state_and_reply(
-                        context,
-                        "EstadoPasosInicioSesion",message_store.get_message("descuentos_login_steps_text", default="Como ya pasaron más de 48 horas, probá iniciando sesión.\n\nHacé click en 'RECIBIR CÓDIGO DE ACCESO POR E-MAIL'. Ingresá tu dirección de correo electrónico y hacé click en 'ENVIAR'.\n\nVas a recibir un código en tu mail. Volvé a la página e ingresalo."),
-                        sentiment=sentiment,
-                    )
-
             # Fallback texto libre
             hours = parse_relative_hours(user_text)
             if hours is None:
@@ -787,31 +899,15 @@ class EstadoNoVeoDescuentos(FlowState):
 class EstadoInfoPedido(FlowState):
     """Flujo para información de pedidos."""
 
-    def get_buttons(self, context: FlowContext) -> List[Button]:
-        return [
-            Button("si", message_store.get_message("generic_yes_button", default="✅ Sí")),
-            Button("no", message_store.get_message("generic_no_button", default="❌ No")),
-        ]
+    def get_option_group(self, context: FlowContext) -> Optional[str]:
+        return "info_pedido_opciones"
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
         sentiment = detect_sentiment_basic(user_text)
 
-        # Manejar respuesta de botón
-        if user_text.startswith("button_"):
-            button_id = user_text.replace("button_", "")
-            if button_id == "si":
-                return _set_state_and_reply(
-                    context,
-                    "EstadoInicial",
-                    message_store.get_message("welcome_message", default=WELCOME_MESSAGE),
-                    sentiment=sentiment,
-                )
-            elif button_id == "no":
-                return _set_state_and_reply(
-                    context,
-                    "EstadoFinalizado",message_store.get_message("goodbye_text", default="Excelente, nos vemos luego. Estoy muy feliz de haberte podido ayudar 😊💙"),
-                    sentiment=sentiment,
-                )
+        routed = self.route_dynamic_option(context, user_text, sentiment)
+        if routed is not None:
+            return routed
 
         # Fallback texto libre
         answer = parse_yes_no(user_text)
@@ -907,30 +1003,15 @@ class EstadoPedirMail(FlowState):
 
 @StateFactory.register("EstadoRegistroMailEmpresa")
 class EstadoRegistroMailEmpresa(FlowState):
-    def get_buttons(self, context: FlowContext) -> List[Button]:
-        return [
-            Button("si", message_store.get_message("generic_yes_button", default="✅ Sí")),
-            Button("no", message_store.get_message("generic_no_button", default="❌ No")),
-        ]
+    def get_option_group(self, context: FlowContext) -> Optional[str]:
+        return "registro_mail_empresa_opciones"
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
         sentiment = detect_sentiment_basic(user_text)
 
-        if user_text.startswith("button_"):
-            button_id = user_text.replace("button_", "")
-            if button_id == "si":
-                return _set_state_and_reply(
-                    context,
-                    "EstadoConsultaAdicional",message_store.get_message("follow_up_help_text", default="Perfecto, te ayudo con algo más?"),
-                    sentiment=sentiment,
-                )
-            elif button_id == "no":
-                context.set_var("clear_nav_step", "confirmar")
-                return _set_state_and_reply(
-                    context,
-                    "EstadoBorrarNavegacion",message_store.get_message("borrar_nav_confirm_text", default="En ese caso, borremos los datos de navegación del navegador para volver a intentarlo. Te parece?"),
-                    sentiment=sentiment,
-                )
+        routed = self.route_dynamic_option(context, user_text, sentiment)
+        if routed is not None:
+            return routed
 
         answer = parse_yes_no(user_text)
 
@@ -957,30 +1038,21 @@ class EstadoRegistroMailEmpresa(FlowState):
 
 @StateFactory.register("EstadoLogin")
 class EstadoLogin(FlowState):
-    def get_buttons(self, context: FlowContext) -> List[Button]:
-        return [
-            Button("si", message_store.get_message("generic_yes_button", default="✅ Sí")),
-            Button("no", message_store.get_message("generic_no_button", default="❌ No")),
-        ]
+    def prompt(self, context: FlowContext) -> str:
+        return message_store.get_message(
+            "ask_ingresado_antes_text",
+            default="¿Ya habías ingresado antes al portal de beneficios? 🔐",
+        )
+
+    def get_option_group(self, context: FlowContext) -> Optional[str]:
+        return "login_opciones"
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
         sentiment = detect_sentiment_basic(user_text)
 
-        if user_text.startswith("button_"):
-            button_id = user_text.replace("button_", "")
-            if button_id == "si":
-                context.set_var("login_step", 3)
-                return _set_state_and_reply(
-                    context,
-                    "EstadoPasosInicioSesion",message_store.get_message("login_steps_intro_text", default="Si ya recibiste el mail de confirmación con el acceso a la Plataforma, hacé click en \"RECIBIR CÓDIGO DE ACCESO POR E-MAIL\".\nIngresá tu dirección de correo electrónico, y hacé click en \"ENVIAR\".\n\nVas a recibir una clave numérica en tu mail. Volvé a la página e ingresalo.\n\nDeberías acceder sin problemas"),
-                    sentiment=sentiment,
-                )
-            elif button_id == "no":
-                return _set_state_and_reply(
-                    context,
-                    "EstadoFormulario",message_store.get_message("formulario_question_text", default="Cargaste el formulario? 📝"),
-                    sentiment=sentiment,
-                )
+        routed = self.route_dynamic_option(context, user_text, sentiment)
+        if routed is not None:
+            return routed
 
         answer = parse_yes_no(user_text)
 
@@ -1008,18 +1080,18 @@ class EstadoLogin(FlowState):
 
 @StateFactory.register("EstadoPasosInicioSesion")
 class EstadoPasosInicioSesion(FlowState):
-    def get_buttons(self, context: FlowContext) -> List[Button]:
-        step = int(context.get_var("login_step", 0))
-        if step >= 3:
-            return [
-                Button("funciono", message_store.get_message("generic_funciono_button", default="✅ Funcionó")),
-                Button("no_funciono", message_store.get_message("generic_no_funciono_button", default="❌ No funcionó")),
-            ]
-        return []
+    def get_option_group(self, context: FlowContext) -> Optional[str]:
+        if int(context.get_var("login_step", 0)) >= 3:
+            return "pasos_inicio_sesion_resultado"
+        return None
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
         sentiment = detect_sentiment_basic(user_text)
         step = int(context.get_var("login_step", 0))
+
+        routed = self.route_dynamic_option(context, user_text, sentiment)
+        if routed is not None:
+            return routed
 
         if step == 0:
             context.set_var("login_step", 1)
@@ -1039,24 +1111,6 @@ class EstadoPasosInicioSesion(FlowState):
                 context,message_store.get_message("pasos_step3_text", default="Vas a recibir un código en tu mail corporativo. Volvé a la página e ingresalo. 📧"),
                 sentiment=sentiment,
             )
-
-        # Manejar respuesta de botón
-        if user_text.startswith("button_"):
-            button_id = user_text.replace("button_", "")
-            if button_id == "funciono":
-                context.set_var("login_step", 0)
-                return _set_state_and_reply(
-                    context,
-                    "EstadoConsultaAdicional",message_store.get_message("follow_up_help_text", default="Perfecto, te ayudo con algo más?"),
-                    sentiment=sentiment,
-                )
-            elif button_id == "no_funciono":
-                return _set_state_and_reply(
-                    context,
-                    "EstadoSoporte",message_store.get_message("handoff_text", default="Perdón, no estoy pudiendo resolver esto desde acá. Te voy a derivar con una persona más calificada que lo resuelva con vos. 🤝"),
-                    sentiment=sentiment,
-                    handoff=True,
-                )
 
         answer = parse_yes_no(user_text)
         if answer is True or looks_like_positive_closure(user_text):
@@ -1080,30 +1134,20 @@ class EstadoPasosInicioSesion(FlowState):
 
 @StateFactory.register("EstadoConsultaAdicional")
 class EstadoConsultaAdicional(FlowState):
-    def get_buttons(self, context: FlowContext) -> List[Button]:
-        return [
-            Button("si", message_store.get_message("generic_yes_button", default="✅ Sí")),
-            Button("no", message_store.get_message("generic_no_button", default="❌ No")),
-        ]
+    def prompt(self, context: FlowContext) -> str:
+        return message_store.get_message(
+            "follow_up_help_text", default="Perfecto, ¿te ayudo con algo más?"
+        )
+
+    def get_option_group(self, context: FlowContext) -> Optional[str]:
+        return "consulta_adicional_opciones"
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
         sentiment = detect_sentiment_basic(user_text)
 
-        if user_text.startswith("button_"):
-            button_id = user_text.replace("button_", "")
-            if button_id == "no":
-                return _set_state_and_reply(
-                    context,
-                    "EstadoFinalizado",message_store.get_message("goodbye_text", default="Excelente, nos vemos luego. Estoy muy feliz de haberte podido ayudar 😊💙"),
-                    sentiment=sentiment,
-                )
-            elif button_id == "si":
-                return _set_state_and_reply(
-                    context,
-                    "EstadoInicial",
-                    message_store.get_message("welcome_message", default=WELCOME_MESSAGE),
-                    sentiment=sentiment,
-                )
+        routed = self.route_dynamic_option(context, user_text, sentiment)
+        if routed is not None:
+            return routed
 
         answer = parse_yes_no(user_text)
 
@@ -1130,23 +1174,21 @@ class EstadoFinalizado(FlowState):
     def is_terminal(self) -> bool:
         return True
 
-    def get_buttons(self, context: FlowContext) -> List[Button]:
-        return [
-            Button("volver", message_store.get_message("volver_inicio_button", default="Volver al inicio")),
-        ]
+    def prompt(self, context: FlowContext) -> str:
+        return message_store.get_message(
+            "goodbye_text",
+            default="Excelente, nos vemos luego. Estoy muy feliz de haberte podido ayudar 😊💙",
+        )
+
+    def get_option_group(self, context: FlowContext) -> Optional[str]:
+        return "finalizado_opciones"
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
         sentiment = detect_sentiment_basic(user_text)
 
-        if user_text.startswith("button_"):
-            button_id = user_text.replace("button_", "")
-            if button_id == "volver":
-                return _set_state_and_reply(
-                    context,
-                    "EstadoInicial",
-                    message_store.get_message("welcome_message", default=WELCOME_MESSAGE),
-                    sentiment=sentiment,
-                )
+        routed = self.route_dynamic_option(context, user_text, sentiment)
+        if routed is not None:
+            return routed
 
         return self.response(
             context,message_store.get_message("goodbye_text", default="Excelente, nos vemos luego. Estoy muy feliz de haberte podido ayudar 😊💙"),
@@ -1156,38 +1198,27 @@ class EstadoFinalizado(FlowState):
 
 @StateFactory.register("EstadoFormulario")
 class EstadoFormulario(FlowState):
-    def get_buttons(self, context: FlowContext) -> List[Button]:
+    def prompt(self, context: FlowContext) -> str:
+        return message_store.get_message(
+            "formulario_question_text", default="¿Cargaste el formulario? 📝"
+        )
+
+    def get_option_group(self, context: FlowContext) -> Optional[str]:
         substep = context.get_var("form_substep", "pregunta_cargaste")
-        if substep == "pregunta_cargaste":
-            return [
-                Button("si", message_store.get_message("generic_si_loaded_button", default="✅ Sí, lo cargué")),
-                Button("no", message_store.get_message("generic_no_loaded_button", default="❌ No lo cargué")),
-            ]
-        elif substep == "pregunta_cuando":
-            return [
-                Button("menos_48", message_store.get_message("generic_menos_48_button", default="Menos de 48hs")),
-                Button("mas_48", message_store.get_message("generic_mas_48_button", default="Más de 48hs")),
-            ]
-        return []
+        return {
+            "pregunta_cargaste": "formulario_pregunta_cargaste",
+            "pregunta_cuando": "formulario_pregunta_cuando",
+        }.get(substep)
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
         sentiment = detect_sentiment_basic(user_text)
         substep = context.get_var("form_substep", "pregunta_cargaste")
 
-        if substep == "pregunta_cargaste":
-            # Manejar respuesta de botón
-            if user_text.startswith("button_"):
-                button_id = user_text.replace("button_", "")
-                if button_id == "si":
-                    context.set_var("form_substep", "pregunta_cuando")
-                    return self.response(context, message_store.get_message("ask_when_loaded_text", default="¿Cuándo lo cargaste?"), sentiment=sentiment)
-                elif button_id == "no":
-                    context.set_var("form_substep", "fin")
-                    return self.response(
-                        context,message_store.get_message("not_loaded_form_text", default="Hay un formulario en la página de registro que tenés que completar. Una vez hecho eso, esperá 48 horas y volvé a intentar."),
-                        sentiment=sentiment,
-                    )
+        routed = self.route_dynamic_option(context, user_text, sentiment)
+        if routed is not None:
+            return routed
 
+        if substep == "pregunta_cargaste":
             if looks_like_form_confusion(user_text):
                 context.set_var("form_substep", "fin")
                 return _set_state_and_reply(
@@ -1213,23 +1244,6 @@ class EstadoFormulario(FlowState):
             return self.response(context, message_store.get_message("ask_loaded_form_text", default="Contame si llegaste a cargar el formulario."), sentiment=sentiment)
 
         if substep == "pregunta_cuando":
-            # Manejar respuesta de botón
-            if user_text.startswith("button_"):
-                button_id = user_text.replace("button_", "")
-                if button_id == "menos_48":
-                    context.set_var("form_substep", "fin")
-                    return self.response(
-                        context,message_store.get_message("wait_48_form_text", default="Perfecto. En ese caso hay que esperar 48 horas para que termine el registro. 😊"),
-                        sentiment=sentiment,
-                    )
-                elif button_id == "mas_48":
-                    context.set_var("form_substep", "fin")
-                    return _set_state_and_reply(
-                        context,
-                        "EstadoPasosInicioSesion",message_store.get_message("formulario_login_steps_text", default="Como ya pasaron más de 48 horas, probá iniciando sesión.\n\nHacé click en 'RECIBIR CÓDIGO DE ACCESO POR E-MAIL'."),
-                        sentiment=sentiment,
-                    )
-
             hours = parse_relative_hours(user_text)
             if hours is None:
                 return self.response(
@@ -1256,29 +1270,15 @@ class EstadoFormulario(FlowState):
 
 @StateFactory.register("EstadoPortalBeneficios")
 class EstadoPortalBeneficios(FlowState):
-    def get_buttons(self, context: FlowContext) -> List[Button]:
-        return [
-            Button("si", message_store.get_message("generic_yes_button", default="✅ Sí")),
-            Button("no", message_store.get_message("generic_no_button", default="❌ No")),
-        ]
+    def get_option_group(self, context: FlowContext) -> Optional[str]:
+        return "portal_beneficios_opciones"
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
         sentiment = detect_sentiment_basic(user_text)
 
-        if user_text.startswith("button_"):
-            button_id = user_text.replace("button_", "")
-            if button_id == "si":
-                return _set_state_and_reply(
-                    context,
-                    "EstadoBorrarNavegacion",message_store.get_message("portal_beneficios_clear_nav_text", default="Lo mejor en este caso es borrar los datos de navegación para asegurarnos de que salga bien. Te parece? 🧹"),
-                    sentiment=sentiment,
-                )
-            elif button_id == "no":
-                return _set_state_and_reply(
-                    context,
-                    "EstadoLogin",message_store.get_message("ask_ingresado_antes_text", default="Ya habías ingresado antes al portal de beneficios? 🔐"),
-                    sentiment=sentiment,
-                )
+        routed = self.route_dynamic_option(context, user_text, sentiment)
+        if routed is not None:
+            return routed
 
         answer = parse_yes_no(user_text)
 
@@ -1304,23 +1304,47 @@ class EstadoPortalBeneficios(FlowState):
 
 @StateFactory.register("EstadoBorrarNavegacion")
 class EstadoBorrarNavegacion(FlowState):
-    def get_buttons(self, context: FlowContext) -> List[Button]:
+    def get_option_group(self, context: FlowContext) -> Optional[str]:
         step = context.get_var("clear_nav_step", "confirmar")
-        if step in ["confirmar", "sabe_como", "explicar_motivo"]:
-            return [
-                Button("si", message_store.get_message("generic_yes_button", default="✅ Sí")),
-                Button("no", message_store.get_message("generic_no_button", default="❌ No")),
-            ]
-        elif step == "esperando_confirmacion":
-            return [
-                Button("listo", message_store.get_message("generic_listo_button", default="✅ Ya lo hice")),
-            ]
-        elif step == "finalizado":
-            return [
-                Button("funciono", message_store.get_message("generic_funciono_button", default="✅ Funcionó")),
-                Button("no_funciono", message_store.get_message("generic_no_funciono_button", default="❌ No funcionó")),
-            ]
-        return []
+        return {
+            "confirmar": "borrar_nav_confirmar",
+            "explicar_motivo": "borrar_nav_explicar_motivo",
+            "sabe_como": "borrar_nav_sabe_como",
+            "esperando_confirmacion": "borrar_nav_esperando_confirmacion",
+            "finalizado": "borrar_nav_finalizado",
+        }.get(step)
+
+    def handle_dynamic_option_override(
+        self,
+        context: FlowContext,
+        option_group: str,
+        option: Dict[str, Any],
+        sentiment: str,
+        extra: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        if option_group != "borrar_nav_esperando_confirmacion" or option["option_id"] != "listo":
+            return None
+
+        # Excepción acordada: esta respuesta interpola el código de empresa y cambia según
+        # el flujo. Se conserva en código porque es el único template dinámico de este tipo.
+        flujo = context.get_var("flujo")
+        code = context.get_session_data().code or "{CODIGO}"
+        if flujo == "registro":
+            return self.response(
+                context,
+                f"{message_store.get_message('borrar_nav_registro_code_text', default='Ingresá de nuevo, hacé click en registro, ingresá tu mail y usá este código:')} {code}.",
+                sentiment=sentiment,
+                **extra,
+            )
+        return self.response(
+            context,
+            message_store.get_message(
+                "borrar_nav_try_again_text",
+                default="Perfecto. Probá de nuevo y contame si funcionó.",
+            ),
+            sentiment=sentiment,
+            **extra,
+        )
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
         sentiment = detect_sentiment_basic(user_text)
@@ -1328,19 +1352,11 @@ class EstadoBorrarNavegacion(FlowState):
         flujo = context.get_var("flujo")
         code = context.get_session_data().code or "{CODIGO}"
 
-        if step == "confirmar":
-            if user_text.startswith("button_"):
-                button_id = user_text.replace("button_", "")
-                if button_id == "si":
-                    context.set_var("clear_nav_step", "sabe_como")
-                    return self.response(context, message_store.get_message("borrar_nav_ask_know_how_text", default="Sabés cómo hacerlo?"), sentiment=sentiment)
-                elif button_id == "no":
-                    context.set_var("clear_nav_step", "explicar_motivo")
-                    return self.response(
-                        context,message_store.get_message("borrar_nav_explain_why_text", default="Te cuento por qué te lo pido! A veces el navegador guarda credenciales viejas o incorrectas del portal de beneficios, y eso puede ser justo lo que está causando el problema. Borrando esos datos le damos un reinicio limpio y lo más probable es que todo funcione de una. Sabés cómo hacerlo?"),
-                        sentiment=sentiment,
-                    )
+        routed = self.route_dynamic_option(context, user_text, sentiment)
+        if routed is not None:
+            return routed
 
+        if step == "confirmar":
             answer = parse_yes_no(user_text)
             if answer is True:
                 context.set_var("clear_nav_step", "sabe_como")
@@ -1354,18 +1370,6 @@ class EstadoBorrarNavegacion(FlowState):
             return self.response(context, message_store.get_message("borrar_nav_ask_agree_text", default="Contame si te parece bien que borremos los datos de navegación."), sentiment=sentiment)
 
         if step == "explicar_motivo":
-            if user_text.startswith("button_"):
-                button_id = user_text.replace("button_", "")
-                if button_id == "si":
-                    context.set_var("clear_nav_step", "esperando_confirmacion")
-                    return self.response(context, message_store.get_message("borrar_nav_wait_finish_text", default="Perfecto, avisame cuando termines."), sentiment=sentiment)
-                elif button_id == "no":
-                    context.set_var("clear_nav_step", "explicar_como")
-                    return self.response(
-                        context,message_store.get_message("borrar_nav_how_to_text", default="Abrí Chrome y tocá en los tres puntos (arriba a la derecha).\nSeleccioná \"Historial\" y luego \"Borrar datos de navegación\".\nElegí el intervalo de tiempo y marcá los datos a eliminar.\nTocá en \"Borrar datos\".\n\nAvisame cuando termines."),
-                        sentiment=sentiment,
-                    )
-
             answer = parse_yes_no(user_text)
             if answer is True:
                 context.set_var("clear_nav_step", "esperando_confirmacion")
@@ -1379,18 +1383,6 @@ class EstadoBorrarNavegacion(FlowState):
             return self.response(context, message_store.get_message("borrar_nav_ask_know_how_fallback_text", default="Contame si sabés cómo hacerlo."), sentiment=sentiment)
 
         if step == "sabe_como":
-            if user_text.startswith("button_"):
-                button_id = user_text.replace("button_", "")
-                if button_id == "si":
-                    context.set_var("clear_nav_step", "esperando_confirmacion")
-                    return self.response(context, message_store.get_message("borrar_nav_wait_finish_text", default="Perfecto, avisame cuando termines."), sentiment=sentiment)
-                elif button_id == "no":
-                    context.set_var("clear_nav_step", "explicar_como")
-                    return self.response(
-                        context,message_store.get_message("borrar_nav_how_to_text", default="Abrí Chrome y tocá en los tres puntos (arriba a la derecha).\nSeleccioná \"Historial\" y luego \"Borrar datos de navegación\".\nElegí el intervalo de tiempo y marcá los datos a eliminar.\nTocá en \"Borrar datos\".\n\nAvisame cuando termines."),
-                        sentiment=sentiment,
-                    )
-
             answer = parse_yes_no(user_text)
             if answer is True:
                 context.set_var("clear_nav_step", "esperando_confirmacion")
@@ -1408,18 +1400,6 @@ class EstadoBorrarNavegacion(FlowState):
             return self.response(context, message_store.get_message("borrar_nav_ask_finished_text", default="Avisame cuando lo termines."), sentiment=sentiment)
 
         if step == "esperando_confirmacion":
-            if user_text.startswith("button_"):
-                button_id = user_text.replace("button_", "")
-                if button_id == "listo":
-                    context.set_var("clear_nav_step", "finalizado")
-                    if flujo == "registro":
-                        return self.response(
-                            context,
-                            f"{message_store.get_message('borrar_nav_registro_code_text', default='Ingresá de nuevo, hacé click en registro, ingresá tu mail y usá este código:')} {code}.",
-                            sentiment=sentiment,
-                        )
-                    return self.response(context, message_store.get_message("borrar_nav_try_again_text", default="Perfecto. Probá de nuevo y contame si funcionó."), sentiment=sentiment)
-
             answer = parse_yes_no(user_text)
             if answer is not True:
                 return self.response(context, message_store.get_message("borrar_nav_wait_again_text", default="Cuando termines, avisame y seguimos."), sentiment=sentiment)
@@ -1434,22 +1414,6 @@ class EstadoBorrarNavegacion(FlowState):
             return self.response(context, message_store.get_message("borrar_nav_try_again_text", default="Perfecto. Probá de nuevo y contame si funcionó."), sentiment=sentiment)
 
         if step == "finalizado":
-            if user_text.startswith("button_"):
-                button_id = user_text.replace("button_", "")
-                if button_id == "funciono":
-                    return _set_state_and_reply(
-                        context,
-                        "EstadoConsultaAdicional",message_store.get_message("follow_up_help_text", default="Perfecto, te ayudo con algo más?"),
-                        sentiment=sentiment,
-                    )
-                elif button_id == "no_funciono":
-                    return _set_state_and_reply(
-                        context,
-                        "EstadoSoporte",message_store.get_message("handoff_text", default="Perdón, no estoy pudiendo resolver esto desde acá. Te voy a derivar con una persona más calificada que lo resuelva con vos. 🤝"),
-                        sentiment=sentiment,
-                        handoff=True,
-                    )
-
             answer = parse_yes_no(user_text)
             if answer is True or looks_like_positive_closure(user_text):
                 return _set_state_and_reply(
@@ -1577,6 +1541,10 @@ __all__ = [
     "FlowController",
     "Button",
     "ListRow",
+    "RenderedOptionGroup",
+    "OptionGroupRenderError",
+    "OptionRoutingError",
+    "render_option_group",
     "WELCOME_MESSAGE",
     "EMAIL_RE",
     "EstadoInicial",

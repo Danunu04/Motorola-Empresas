@@ -1,3 +1,6 @@
 contexto.md
 mensaje-wiring.txt
 *.backup
+.pytest_cache/
+.streamlit/
+__pycache__/
