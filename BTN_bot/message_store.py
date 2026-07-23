@@ -1386,8 +1386,13 @@ def _load_from_bigquery() -> List[Dict[str, Any]]:
     query = f"""
         SELECT message_key, message_type, state_name, flujo_identificacion_mensaje,
                label, content, default_content, orden, updated_at, updated_by
-        FROM `{_table_id(client)}`
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY message_key ORDER BY updated_at DESC) = 1
+        FROM (
+            SELECT message_key, message_type, state_name, flujo_identificacion_mensaje,
+                   label, content, default_content, orden, updated_at, updated_by, deleted
+            FROM `{_table_id(client)}`
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY message_key ORDER BY updated_at DESC) = 1
+        )
+        WHERE deleted = FALSE OR deleted IS NULL
     """
     rows = client.query(query).result()
     records = []
@@ -1405,6 +1410,32 @@ def _load_from_bigquery() -> List[Dict[str, Any]]:
             "updated_by": row["updated_by"],
         })
     return records
+
+
+def delete_message(message_key: str, updated_by: str = "") -> None:
+    meta = get_message_metadata(message_key)
+    if meta is None:
+        raise KeyError(f"message_key '{message_key}' no existe")
+
+    client = _get_client()
+    now = datetime.now(timezone.utc).isoformat()
+    row = {
+        "message_key": message_key,
+        "message_type": meta["message_type"],
+        "state_name": meta.get("state_name"),
+        "flujo_identificacion_mensaje": meta.get("flujo_identificacion_mensaje"),
+        "label": meta.get("label"),
+        "content": meta["content"],
+        "default_content": meta["default_content"],
+        "orden": meta.get("orden"),
+        "updated_at": now,
+        "updated_by": updated_by or "",
+        "deleted": True,
+    }
+    errors = client.insert_rows_json(_table_id(client), [row])
+    if errors:
+        raise RuntimeError(str(errors))
+    invalidate_cache()
 
 
 def _isoformat_or_none(value: Any) -> Optional[str]:

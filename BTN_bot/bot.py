@@ -1487,6 +1487,22 @@ def update_message(message_key: str, req: MessageUpdateRequest):
     return {"ok": True, "message_key": message_key}
 
 
+@app.delete("/messages/{message_key}")
+def delete_message(message_key: str, updated_by: str = Query(default="")):
+    try:
+        message_store.delete_message(message_key, updated_by=updated_by)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="message_key no registrada") from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"BigQuery no disponible para eliminar el mensaje: {exc}",
+        ) from exc
+
+    logger.info(f"[messages] {message_key} eliminado por {updated_by}")
+    return {"ok": True, "message_key": message_key}
+
+
 @app.post("/messages/{message_key}/reset")
 def reset_message(message_key: str, req: MessageResetBody):
     meta = message_store.get_message_metadata(message_key)
