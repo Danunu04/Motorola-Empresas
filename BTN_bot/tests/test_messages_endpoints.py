@@ -27,6 +27,7 @@ class TestListMessages:
         assert resp.status_code == 200
         body = resp.json()
         assert body["ok"] is True
+        assert body["source"] == "default"
         assert body["messages"]
         assert all(item["source"] == "default" for item in body["messages"])
 
@@ -54,6 +55,11 @@ class TestUpdateMessage:
             json={"content": "Hola!", "updated_by": "qa"},
         )
         assert resp.status_code == 503
+        assert resp.json()["detail"] == {
+            "message": message_store.EDITOR_STORAGE_UNAVAILABLE_MESSAGE,
+            "field": None,
+            "code": "storage_unavailable",
+        }
 
 
 class TestResetMessage:
@@ -64,6 +70,37 @@ class TestResetMessage:
     def test_known_key_without_bigquery_returns_503(self):
         resp = client.post("/messages/welcome_message/reset", json={"updated_by": "qa"})
         assert resp.status_code == 503
+
+
+class TestDeleteMessage:
+    def test_successful_delete_returns_message_key(self, monkeypatch):
+        calls = []
+
+        def fake_delete(message_key, updated_by=""):
+            calls.append((message_key, updated_by))
+
+        monkeypatch.setattr(message_store, "delete_message", fake_delete)
+
+        resp = client.delete("/messages/welcome_message?updated_by=qa")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "message_key": "welcome_message"}
+        assert calls == [("welcome_message", "qa")]
+
+    def test_unknown_key_returns_404(self):
+        resp = client.delete("/messages/no_existe")
+
+        assert resp.status_code == 404
+
+    def test_already_deleted_key_returns_404(self, monkeypatch):
+        def fake_delete(message_key, updated_by=""):
+            raise KeyError(message_key)
+
+        monkeypatch.setattr(message_store, "delete_message", fake_delete)
+
+        resp = client.delete("/messages/welcome_message")
+
+        assert resp.status_code == 404
 
 
 class TestCreateMessage:

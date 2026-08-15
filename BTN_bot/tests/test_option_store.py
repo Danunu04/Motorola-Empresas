@@ -1,6 +1,7 @@
 """Tests permanentes del almacenamiento append-only de opciones."""
 
 import copy
+import json
 
 import pytest
 
@@ -37,8 +38,28 @@ class FakeQueryClient(FakeInsertClient):
         return FakeQueryJob()
 
 
+class FakeVersionJob:
+    def __init__(self, version_ids):
+        self.version_ids = version_ids
+
+    def result(self):
+        return [{"version_id": version_id} for version_id in self.version_ids]
+
+
+class FakeExistingSeedClient(FakeInsertClient):
+    def __init__(self, option_versions, config_versions):
+        super().__init__()
+        self.option_versions = option_versions
+        self.config_versions = config_versions
+
+    def query(self, sql):
+        versions = self.option_versions if "option_bindings" in sql else self.config_versions
+        return FakeVersionJob(versions)
+
+
 @pytest.fixture(autouse=True)
 def _local_defaults(monkeypatch):
+    monkeypatch.setattr(message_store, "BIGQUERY_DATASET", "unit_test_dataset")
     monkeypatch.setattr(message_store, "_bigquery_configured", lambda: False)
     message_store.invalidate_cache()
     yield
@@ -53,24 +74,25 @@ def _seed_option(option_group="grupo", option_id="uno"):
 
 
 class TestOptionSchemas:
-    def test_option_bindings_schema_has_final_17_fields(self):
+    def test_option_bindings_schema_has_phase1_18_fields(self):
         if message_store.bigquery is None:
             pytest.skip("google-cloud-bigquery no instalado")
         fields = message_store._option_bindings_schema()
         assert [field.name for field in fields] == [
             "option_group", "option_id", "orden", "title_key", "button_title_key",
-            "description_key", "target_state", "target_vars", "stay_in_state",
+            "description_key", "target_state", "target_vars", "target_option_group", "stay_in_state",
             "target_substep_key", "target_substep_value", "reply_key", "extra_flags",
             "deleted", "updated_at", "version_id", "updated_by",
         ]
         assert next(field for field in fields if field.name == "deleted").default_value_expression == "FALSE"
 
-    def test_option_group_config_schema_has_final_7_fields(self):
+    def test_option_group_config_schema_has_phase1_10_fields(self):
         if message_store.bigquery is None:
             pytest.skip("google-cloud-bigquery no instalado")
         fields = message_store._option_group_config_schema()
         assert [field.name for field in fields] == [
-            "option_group", "button_text_key", "section_title_key", "deleted",
+            "option_group", "button_text_key", "section_title_key", "prompt_key",
+            "prev_message_keys", "shared_prev_keys", "deleted",
             "updated_at", "version_id", "updated_by",
         ]
 
@@ -98,11 +120,96 @@ class TestOptionFallbacks:
         assert registro["title"] == "No me puedo registrar"
         assert registro["button_title"] == "No puedo registrarme"
 
+    def test_preflow_bindings_have_no_legacy_router_variables(self):
+        menu_options = [
+            option for option in message_store.DEFAULT_OPTION_BINDINGS
+            if option["option_group"] == "menu_principal"
+        ]
+        assert all(json.loads(option["target_vars"]) == {"intentos_identificacion": 0}
+                   for option in menu_options)
+        discount_continue = next(
+            option for option in message_store.DEFAULT_OPTION_BINDINGS
+            if option["option_group"] == "preflujo_desde_descuentos"
+        )
+        assert json.loads(discount_continue["target_vars"]) == {
+            "flujo": "descuentos",
+            "descuentos_substep": "pregunta_cargaste",
+        }
+
     def test_unknown_group_receives_generic_config(self):
         config = message_store.get_option_group_config("grupo_nuevo")
         assert config["button_text"] == "Ver opciones"
         assert config["section_title"] == "Opciones"
+        assert config["button_text_key"] == "grupo_nuevo_button_text"
+        assert config["prompt_key"] == "grupo_nuevo_prompt_text"
+        assert config["prev_message_keys"] == []
+        assert config["shared_prev_keys"] == []
         assert config["source"] == "default-fallback"
+
+    def test_seed_snapshot_has_47_active_options_and_26_active_configs(self):
+        client = FakeQueryClient()
+
+        message_store._seed_option_tables(client)
+
+        assert len(client.inserts) == 2
+        option_rows = client.inserts[0]["rows"]
+        config_rows = client.inserts[1]["rows"]
+        assert len([row for row in option_rows if not row["deleted"]]) == 47
+        assert len([row for row in option_rows if row["deleted"]]) == 7
+        assert len([row for row in config_rows if not row["deleted"]]) == 26
+        assert len([row for row in config_rows if row["deleted"]]) == 4
+        assert all("target_option_group" in row for row in option_rows)
+        assert all(row.get("prompt_key") for row in config_rows)
+
+    def test_previous_seed_only_receives_four_menu_updates_and_four_new_preflow_rows(self):
+        option_versions = {
+            message_store._deterministic_seed_id(
+                message_store.BIGQUERY_OPTION_BINDINGS_TABLE,
+                f'{option["option_group"]}:{option["option_id"]}',
+            )
+            for option in message_store.DEFAULT_OPTION_BINDINGS
+            if option["option_group"] not in message_store.PREFLOW_GROUPS
+        }
+        option_versions.update({
+            message_store._deterministic_seed_id(
+                message_store.BIGQUERY_OPTION_BINDINGS_TABLE,
+                f'obsolete:{option["option_group"]}:{option["option_id"]}',
+            )
+            for option in message_store.LEGACY_PHASE1_OPTION_BINDINGS
+        })
+        config_versions = {
+            message_store._deterministic_seed_id(
+                message_store.BIGQUERY_OPTION_GROUP_CONFIG_TABLE,
+                config["option_group"],
+            )
+            for config in message_store.DEFAULT_OPTION_GROUP_CONFIGS
+            if config["option_group"] not in message_store.PREFLOW_GROUPS
+        }
+        config_versions.update({
+            message_store._deterministic_seed_id(
+                message_store.BIGQUERY_OPTION_GROUP_CONFIG_TABLE,
+                f"obsolete:{option_group}",
+            )
+            for option_group in message_store.LEGACY_PHASE1_OPTION_GROUPS
+        })
+        client = FakeExistingSeedClient(option_versions, config_versions)
+
+        message_store._seed_option_tables(client)
+
+        option_rows = client.inserts[0]["rows"]
+        config_rows = client.inserts[1]["rows"]
+        assert len(option_rows) == 8
+        assert {
+            (row["option_group"], row["option_id"])
+            for row in option_rows
+        } == {
+            *(('menu_principal', option_id)
+              for option_id in message_store.PREFLOW_ENTRY_GROUP_BY_MENU_OPTION),
+            *((group, 'continuar') for group in message_store.PREFLOW_GROUPS),
+        }
+        assert {row["option_group"] for row in config_rows} == set(
+            message_store.PREFLOW_GROUPS
+        )
 
 
 class TestAppendOnlyWrites:
@@ -113,7 +220,7 @@ class TestAppendOnlyWrites:
         monkeypatch.setattr(message_store, "_ensure_persisted_group_config", lambda *args: None)
 
         row = message_store.create_option_binding(
-            "grupo", "nueva", 10, "generic_yes_button",
+            "grupo", "nueva", 10, "info_pedido_opciones_si_title",
             target_state="EstadoInicial", updated_by="qa",
         )
 
@@ -133,7 +240,7 @@ class TestAppendOnlyWrites:
             message_store._OPTION_CONFIG_CACHE.clear()
 
         message_store.create_option_binding(
-            "grupo_nuevo", "primera", 10, "generic_yes_button",
+            "grupo_nuevo", "primera", 10, "info_pedido_opciones_si_title",
             target_state="EstadoInicial", updated_by="qa",
         )
 
@@ -141,8 +248,9 @@ class TestAppendOnlyWrites:
             "option_group_config", "option_bindings",
         ]
         config = client.inserts[0]["rows"][0]
-        assert config["button_text_key"] == "generic_options_button_text"
-        assert config["section_title_key"] == "generic_options_section_title"
+        assert config["button_text_key"] == "grupo_nuevo_button_text"
+        assert config["section_title_key"] == "grupo_nuevo_section_title"
+        assert config["prompt_key"] == "grupo_nuevo_prompt_text"
 
     def test_update_inserts_complete_new_version(self, monkeypatch):
         client = FakeInsertClient()
@@ -181,7 +289,7 @@ class TestAppendOnlyWrites:
         monkeypatch.setattr(message_store, "_get_client", lambda: client)
 
         row = message_store.set_option_group_config(
-            "grupo", "generic_options_button_text", "generic_options_section_title",
+            "grupo", "main_menu_button_text", "main_menu_section_title", "welcome_message",
             updated_by="qa",
         )
 
@@ -190,8 +298,53 @@ class TestAppendOnlyWrites:
         assert row["deleted"] is False
         assert row["version_id"]
 
+    def test_group_config_persists_ordered_prev_and_shared_keys(self, monkeypatch):
+        client = FakeInsertClient()
+        monkeypatch.setattr(message_store, "_get_client", lambda: client)
+
+        row = message_store.set_option_group_config(
+            "grupo",
+            "main_menu_button_text",
+            "main_menu_section_title",
+            "welcome_message",
+            ["pasos_step1_text", "pasos_step2_text"],
+            ["pasos_step2_text"],
+            updated_by="qa",
+        )
+
+        assert row["prev_message_keys"] == '["pasos_step1_text","pasos_step2_text"]'
+        assert row["shared_prev_keys"] == '["pasos_step2_text"]'
+
+    def test_group_config_rejects_shared_key_outside_prev(self):
+        with pytest.raises(ValueError, match="subconjunto"):
+            message_store.set_option_group_config(
+                "grupo",
+                "main_menu_button_text",
+                "main_menu_section_title",
+                "welcome_message",
+                ["pasos_step1_text"],
+                ["pasos_step2_text"],
+            )
+
 
 class TestOptionConstraints:
+    def test_stay_in_state_allows_removing_its_additional_reply(self):
+        row = _seed_option()
+        row.update({
+            "stay_in_state": True,
+            "target_state": None,
+            "target_substep_key": "paso",
+            "target_substep_value": "fin",
+            "target_option_group": None,
+            "reply_key": None,
+        })
+
+        normalized = message_store._normalize_option_record(row)
+
+        assert normalized["stay_in_state"] is True
+        assert normalized["reply_key"] is None
+        assert normalized["target_option_group"] is None
+
     def test_create_rejects_eleventh_active_option(self, monkeypatch):
         monkeypatch.setattr(
             message_store,
@@ -200,7 +353,7 @@ class TestOptionConstraints:
         )
         with pytest.raises(ValueError, match="superar 10"):
             message_store.create_option_binding(
-                "grupo", "once", 110, "generic_yes_button", target_state="EstadoInicial"
+                "grupo", "once", 110, "info_pedido_opciones_si_title", target_state="EstadoInicial"
             )
 
     def test_delete_rejects_last_active_option_before_writing(self, monkeypatch):
@@ -245,9 +398,9 @@ class TestOptionConstraints:
             })
         with pytest.raises(ValueError, match="button_text_key excede 20"):
             message_store.set_option_group_config(
-                "grupo", "test_button_text", "generic_options_section_title"
+                "grupo", "test_button_text", "main_menu_section_title", "welcome_message"
             )
         with pytest.raises(ValueError, match="section_title_key excede 24"):
             message_store.set_option_group_config(
-                "grupo", "generic_options_button_text", "test_section"
+                "grupo", "main_menu_button_text", "test_section", "welcome_message"
             )

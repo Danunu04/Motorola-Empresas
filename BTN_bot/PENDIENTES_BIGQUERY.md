@@ -11,7 +11,7 @@ El backend (`BTN_bot/bot.py`) y el editor de mensajes del frontend ya están lis
    - Asegurarse de que la API de BigQuery esté habilitada.
 
 2. **Dataset y tabla**
-   - Dataset: el que se use en `BIGQUERY_CHAT_LOG_DATASET` (default: `inspectia_logs`).
+   - Dataset: el definido explícitamente en `BIGQUERY_CHAT_LOG_DATASET` (no tiene default).
    - Tabla: `mensajes_editables` (definida en `BIGQUERY_BOT_MESSAGES_TABLE`).
    - El backend puede crear la tabla automáticamente mediante `_ensure_table()` si la cuenta de servicio tiene permisos de `bigquery.tables.create`.
 

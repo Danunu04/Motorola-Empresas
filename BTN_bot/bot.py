@@ -13,6 +13,7 @@ Endpoints:
 - POST /chat        - Chat API
 - POST /reset       - Reset session
 - GET  /chatlog     - Get chat logs
+- GET  /chatlog/turns - Get atomic conversation turns
 - POST /agent/send  - Agent sends message
 - POST /bot/send    - Bot sends manual message
 - GET  /handoff/sessions - Get handoff sessions
@@ -24,6 +25,8 @@ Endpoints:
 - PUT  /messages/{message_key} - Actualizar el contenido de un mensaje editable
 - POST /messages/{message_key}/reset - Restaurar un mensaje editable a su valor por defecto
 - GET/POST/PUT/DELETE /options - Administrar opciones y configuración de grupos
+- GET  /editor/blocks - Listar la conversación completa como bloques resueltos
+- POST /editor/blocks/{block_id}/opciones - Crear una opción completa desde el editor
 """
 
 import os
@@ -48,6 +51,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from dotenv import load_dotenv
 
 import message_store
+import editor_blocks
+import chat_turn_store
 from flow_states_btn import (
     FlowController,
     FlowContext,
@@ -57,6 +62,7 @@ from flow_states_btn import (
     ListRow,
     WELCOME_MESSAGE,
     EMAIL_RE,
+    FLOW_STATE_LABELS,
 )
 
 try:
@@ -151,9 +157,16 @@ CHAT_LOG_PATH = BASE_DIR / "logs" / "chat_log.json"
 CHAT_LOG_LOCK = Lock()
 BIGQUERY_CLIENT = None
 BIGQUERY_CLIENT_LOCK = Lock()
-BIGQUERY_CHAT_LOG_DATASET = os.getenv("BIGQUERY_CHAT_LOG_DATASET", "inspectia_logs")
+# El dataset debe ser explícito cuando hay proyecto GCP. Un default productivo haría
+# que una terminal o despliegue mal configurado escriba en producción silenciosamente.
+BIGQUERY_CHAT_LOG_DATASET = os.getenv("BIGQUERY_CHAT_LOG_DATASET", "").strip()
+# Nombre lógico estable dentro del dataset explícito; se conserva el default para no
+# exigir configuración innecesaria en el modo local sin BigQuery.
 BIGQUERY_CHAT_LOG_TABLE = os.getenv("BIGQUERY_CHAT_LOG_TABLE", "chat_history")
 BIGQUERY_CHAT_LOG_ENABLED = os.getenv("BIGQUERY_CHAT_LOG_ENABLED", "").lower() in {"1", "true", "yes"}
+BIGQUERY_DATASET_REQUIRED_MESSAGE = (
+    "BIGQUERY_CHAT_LOG_DATASET no está definida — configurá el dataset explícitamente"
+)
 
 NAME_STOPWORDS = {
     "hola", "buenas", "buenos", "dias", "día", "tardes", "noches",
@@ -296,12 +309,21 @@ def _should_use_bigquery_chat_log() -> bool:
     return BIGQUERY_CHAT_LOG_ENABLED and bool(os.getenv("GOOGLE_CLOUD_PROJECT"))
 
 
+def _validate_bigquery_dataset_configuration() -> None:
+    """Fail closed only when GCP is configured; local mode remains configuration-free."""
+
+    if os.getenv("GOOGLE_CLOUD_PROJECT", "").strip() and not BIGQUERY_CHAT_LOG_DATASET:
+        raise RuntimeError(BIGQUERY_DATASET_REQUIRED_MESSAGE)
+
+
 def _get_bigquery_table_id() -> str:
+    _validate_bigquery_dataset_configuration()
     project = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
     return f"{project}.{BIGQUERY_CHAT_LOG_DATASET}.{BIGQUERY_CHAT_LOG_TABLE}"
 
 
 def _ensure_bigquery_chat_table(client) -> None:
+    _validate_bigquery_dataset_configuration()
     dataset_id = f"{client.project}.{BIGQUERY_CHAT_LOG_DATASET}"
     table_id = _get_bigquery_table_id()
 
@@ -383,6 +405,7 @@ def _read_chat_log_bigquery(limit: int = 500) -> List[Dict[str, Any]]:
 CHATLOG_COLUMNS = [
     "turn_id", "timestamp", "session_id", "channel", "environment", "status", "question", "answer",
 ]
+CHATLOG_MAX_RANGE_DAYS = 90
 
 
 def _parse_date_param(value: str, name: str) -> date:
@@ -390,6 +413,31 @@ def _parse_date_param(value: str, name: str) -> date:
         return datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError:
         raise HTTPException(status_code=422, detail=f"'{name}' debe tener formato YYYY-MM-DD")
+
+
+def _validate_chatlog_date_range(
+    from_value: Optional[str],
+    to_value: Optional[str],
+    *,
+    required: bool,
+) -> tuple[Optional[date], Optional[date]]:
+    if required and (not from_value or not to_value):
+        raise HTTPException(status_code=422, detail="Los parámetros 'from' y 'to' son obligatorios")
+    if bool(from_value) != bool(to_value):
+        raise HTTPException(status_code=422, detail="Los parámetros 'from' y 'to' deben enviarse juntos")
+    if not from_value and not to_value:
+        return None, None
+
+    start = _parse_date_param(str(from_value), "from")
+    end = _parse_date_param(str(to_value), "to")
+    if start > end:
+        raise HTTPException(status_code=400, detail="'from' no puede ser posterior a 'to'")
+    if (end - start).days >= CHATLOG_MAX_RANGE_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"El rango máximo permitido es de {CHATLOG_MAX_RANGE_DAYS} días",
+        )
+    return start, end
 
 
 def _filter_chat_log_by_range(
@@ -519,8 +567,124 @@ def _append_chat_log(session_id: str, question: str, answer: str) -> None:
             CHAT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(CHAT_LOG_PATH, "w", encoding="utf-8") as f:
                 json.dump(logs, f, ensure_ascii=False, indent=2)
-    except (OSError, json.JSONDecodeError) as e:
-        logger.error(f"[chat-log] error: {e}")
+    except Exception as e:
+        # El historial es secundario: permisos, billing, conexión o disco nunca
+        # pueden impedir que el bot responda al usuario.
+        logger.error(f"[chat-log] error: {e}", exc_info=True)
+
+
+def _append_turn_safely(turn: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Última barrera: ninguna implementación de logging puede romper el runtime."""
+
+    try:
+        return chat_turn_store.append_turn(turn)
+    except Exception as e:
+        logger.error(f"[chat-turns] error inesperado: {e}", exc_info=True)
+        return None
+
+
+def _button_turn_options(buttons: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    options = []
+    for button in buttons:
+        if not isinstance(button, dict):
+            continue
+        reply = button.get("reply") if isinstance(button.get("reply"), dict) else button
+        options.append({
+            "id": str(reply.get("id") or ""),
+            "title": str(reply.get("title") or ""),
+        })
+    return options
+
+
+def _list_turn_details(list_config: Dict[str, Any]) -> tuple[List[Dict[str, Any]], Optional[str]]:
+    sections = list_config.get("sections", []) if isinstance(list_config, dict) else []
+    first_section = sections[0] if sections and isinstance(sections[0], dict) else {}
+    options = []
+    for row in first_section.get("rows", []):
+        if not isinstance(row, dict):
+            continue
+        option = {
+            "id": str(row.get("id") or ""),
+            "title": str(row.get("title") or ""),
+        }
+        if row.get("description") not in (None, ""):
+            option["description"] = str(row["description"])
+        options.append(option)
+    return options, (str(first_section.get("title")) if first_section.get("title") else None)
+
+
+def _record_whatsapp_delivery(
+    to: str,
+    text: str,
+    *,
+    turn_type: str,
+    author: str = "bot",
+    status: Optional[str] = "answered",
+    options: Optional[List[Dict[str, Any]]] = None,
+    list_name: Optional[str] = None,
+    interactive_type: Optional[str] = None,
+) -> None:
+    phone = normalize_phone(to)
+    if not phone:
+        return
+    _append_turn_safely({
+        "session_id": f"wa:{phone}",
+        "tipo": turn_type,
+        "autor": author,
+        "texto": text,
+        "opciones": options,
+        "nombre_lista": list_name,
+        "interactive_type": interactive_type,
+        "status": status,
+        "channel": "whatsapp",
+    })
+
+
+def _record_api_response(
+    session_id: str,
+    text: str,
+    *,
+    buttons: Optional[List[Dict[str, Any]]] = None,
+    interactive_type: Optional[str] = None,
+    list_config: Optional[Dict[str, Any]] = None,
+) -> None:
+    turn_type = "mensaje"
+    options: Optional[List[Dict[str, Any]]] = None
+    list_name = None
+    stored_interactive_type = None
+    if interactive_type == "list" and list_config:
+        options, list_name = _list_turn_details(list_config)
+        if options:
+            turn_type = "lista"
+            stored_interactive_type = "list"
+    elif buttons:
+        options = _button_turn_options(buttons)
+        if options:
+            turn_type = "botones"
+            stored_interactive_type = "button"
+
+    _append_turn_safely({
+        "session_id": session_id,
+        "tipo": turn_type,
+        "autor": "bot",
+        "texto": text,
+        "opciones": options,
+        "nombre_lista": list_name,
+        "interactive_type": stored_interactive_type,
+        "status": "answered",
+        "channel": "api",
+    })
+
+
+def _record_handoff_event(session_id: str, *, channel: str) -> None:
+    _append_turn_safely({
+        "session_id": session_id,
+        "tipo": "sistema",
+        "autor": "sistema",
+        "texto": "[EN ESPERA DE AGENTE]",
+        "status": "handoff_waiting",
+        "channel": channel,
+    })
 
 
 def _get_saved_name(session_id: str) -> Optional[str]:
@@ -704,6 +868,7 @@ class OptionCreateRequest(BaseModel):
     description_key: Optional[str] = None
     target_state: Optional[str] = None
     target_vars: Optional[Any] = None
+    target_option_group: Optional[str] = None
     stay_in_state: bool = False
     target_substep_key: Optional[str] = None
     target_substep_value: Optional[str] = None
@@ -721,6 +886,7 @@ class OptionUpdateRequest(BaseModel):
     description_key: Optional[str] = None
     target_state: Optional[str] = None
     target_vars: Optional[Any] = None
+    target_option_group: Optional[str] = None
     stay_in_state: Optional[bool] = None
     target_substep_key: Optional[str] = None
     target_substep_value: Optional[str] = None
@@ -734,6 +900,33 @@ class OptionGroupConfigRequest(BaseModel):
 
     button_text_key: str = Field(..., min_length=1)
     section_title_key: str = Field(..., min_length=1)
+    prompt_key: str = Field(..., min_length=1)
+    prev_message_keys: List[str] = Field(default_factory=list)
+    shared_prev_keys: List[str] = Field(default_factory=list)
+    updated_by: str = ""
+
+
+class EditorOptionCreateRequest(BaseModel):
+    """Business-facing composed option creation contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    titulo: str
+    titulo_boton: Optional[str] = None
+    descripcion: Optional[str] = None
+    respuesta: Dict[str, Any]
+    lleva_a: Any
+    posicion: int = Field(..., ge=1)
+    permitir_cambio_a_lista: bool = False
+    updated_by: str = ""
+
+
+class EditorOptionResponseRequest(BaseModel):
+    """Attach or detach the additional bot reply of an existing option."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    respuesta: Dict[str, Any]
     updated_by: str = ""
 
 
@@ -810,10 +1003,17 @@ def _is_rate_limited(state: Dict[str, Any]) -> bool:
 # WhatsApp Messaging
 # ==============================
 
-async def send_whatsapp_text(to: str, text: str) -> None:
+async def send_whatsapp_text(
+    to: str,
+    text: str,
+    *,
+    turn_type: str = "mensaje",
+    author: str = "bot",
+    status: Optional[str] = "answered",
+) -> bool:
     if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
         logger.warning("[whatsapp] faltan credenciales para enviar mensaje")
-        return
+        return False
 
     normalized_to = normalize_phone(to)
 
@@ -822,27 +1022,35 @@ async def send_whatsapp_text(to: str, text: str) -> None:
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json",
     }
+    delivered_text = (text or "")[:4096]
     payload = {
         "messaging_product": "whatsapp",
         "to": normalized_to,
         "type": "text",
-        "text": {"body": (text or "")[:4096]},
+        "text": {"body": delivered_text},
     }
 
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.post(url, headers=headers, json=payload)
         if r.status_code >= 300:
             raise RuntimeError(f"WhatsApp send failed: {r.status_code} {r.text}")
+    _record_whatsapp_delivery(
+        normalized_to,
+        delivered_text,
+        turn_type=turn_type,
+        author=author,
+        status=status,
+    )
+    return True
 
 
-async def send_whatsapp_interactive(to: str, text: str, buttons: List[Dict[str, Any]]) -> None:
+async def send_whatsapp_interactive(to: str, text: str, buttons: List[Dict[str, Any]]) -> bool:
     if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
         logger.warning("[whatsapp] faltan credenciales para enviar mensaje interactivo")
-        return
+        return False
 
     if not buttons:
-        await send_whatsapp_text(to, text)
-        return
+        return await send_whatsapp_text(to, text)
 
     normalized_to = normalize_phone(to)
 
@@ -852,6 +1060,8 @@ async def send_whatsapp_interactive(to: str, text: str, buttons: List[Dict[str, 
         "Content-Type": "application/json",
     }
 
+    delivered_text = (text or "")[:1024]
+    delivered_buttons = buttons[:3]
     payload = {
         "messaging_product": "whatsapp",
         "to": normalized_to,
@@ -859,10 +1069,10 @@ async def send_whatsapp_interactive(to: str, text: str, buttons: List[Dict[str, 
         "interactive": {
             "type": "button",
             "body": {
-                "text": (text or "")[:1024]
+                "text": delivered_text
             },
             "action": {
-                "buttons": buttons[:3]  # WhatsApp limita a 3 botones
+                "buttons": delivered_buttons  # WhatsApp limita a 3 botones
             }
         }
     }
@@ -871,9 +1081,17 @@ async def send_whatsapp_interactive(to: str, text: str, buttons: List[Dict[str, 
         r = await client.post(url, headers=headers, json=payload)
         if r.status_code >= 300:
             raise RuntimeError(f"WhatsApp interactive send failed: {r.status_code} {r.text}")
+    _record_whatsapp_delivery(
+        normalized_to,
+        delivered_text,
+        turn_type="botones",
+        options=_button_turn_options(delivered_buttons),
+        interactive_type="button",
+    )
+    return True
 
 
-async def send_whatsapp_list(to: str, text: str, list_config: Dict[str, Any]) -> None:
+async def send_whatsapp_list(to: str, text: str, list_config: Dict[str, Any]) -> bool:
     """Envía un List Message de WhatsApp (type: list).
 
     list_config formato:
@@ -892,7 +1110,7 @@ async def send_whatsapp_list(to: str, text: str, list_config: Dict[str, Any]) ->
     """
     if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
         logger.warning("[whatsapp] faltan credenciales para enviar list message")
-        return
+        return False
 
     normalized_to = normalize_phone(to)
 
@@ -912,8 +1130,7 @@ async def send_whatsapp_list(to: str, text: str, list_config: Dict[str, Any]) ->
         sections.append(sec)
 
     if not sections or not sections[0].get("rows"):
-        await send_whatsapp_text(to, text)
-        return
+        return await send_whatsapp_text(to, text)
 
     url = f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
     headers = {
@@ -921,6 +1138,7 @@ async def send_whatsapp_list(to: str, text: str, list_config: Dict[str, Any]) ->
         "Content-Type": "application/json",
     }
 
+    delivered_text = (text or "")[:1024]
     payload = {
         "messaging_product": "whatsapp",
         "to": normalized_to,
@@ -928,7 +1146,7 @@ async def send_whatsapp_list(to: str, text: str, list_config: Dict[str, Any]) ->
         "interactive": {
             "type": "list",
             "body": {
-                "text": (text or "")[:1024]
+                "text": delivered_text
             },
             "action": {
                 "button": button_text,
@@ -941,6 +1159,17 @@ async def send_whatsapp_list(to: str, text: str, list_config: Dict[str, Any]) ->
         r = await client.post(url, headers=headers, json=payload)
         if r.status_code >= 300:
             raise RuntimeError(f"WhatsApp list send failed: {r.status_code} {r.text}")
+    delivered_config = {"sections": sections}
+    options, list_name = _list_turn_details(delivered_config)
+    _record_whatsapp_delivery(
+        normalized_to,
+        delivered_text,
+        turn_type="lista",
+        options=options,
+        list_name=list_name,
+        interactive_type="list",
+    )
+    return True
 
 
 # ==============================
@@ -983,8 +1212,7 @@ def reset(req: ResetRequest):
     return {"ok": True, "session_id": req.session_id}
 
 
-@app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+def _process_chat(req: ChatRequest, *, record_turns: bool) -> ChatResponse:
     t0 = time.time()
 
     q = (req.message or "").strip()
@@ -992,11 +1220,26 @@ def chat(req: ChatRequest):
         raise HTTPException(status_code=400, detail="message vacío")
 
     state = get_session(req.session_id)
+    was_handoff = bool(state.get("human_handoff"))
+
+    if record_turns:
+        _append_turn_safely({
+            "session_id": req.session_id,
+            "tipo": "respuesta_usuario",
+            "autor": "usuario",
+            "texto": q,
+            "seleccion_opcion": False,
+            "status": "handoff_waiting" if was_handoff else None,
+            "channel": "api",
+        })
 
     if _is_rate_limited(state):
+        answer = "Esperá un momento antes de mandar otro mensaje, así puedo procesarlo bien."
+        if record_turns:
+            _record_api_response(req.session_id, answer)
         return ChatResponse(
             session_id=req.session_id,
-            answer="Esperá un momento antes de mandar otro mensaje, así puedo procesarlo bien.",
+            answer=answer,
             took_ms=int((time.time() - t0) * 1000),
         )
 
@@ -1010,12 +1253,24 @@ def chat(req: ChatRequest):
         buttons: Optional[List[Dict[str, Any]]] = None,
         interactive_type: Optional[str] = None,
         list_config: Optional[Dict[str, Any]] = None,
+        entered_handoff: bool = False,
     ) -> ChatResponse:
         final_answer = str(answer or "").strip()
         final_answer = _strip_emojis(final_answer)
         final_answer = _capitalize_first(final_answer)
 
         _append_chat_log(req.session_id, q, final_answer)
+
+        if record_turns:
+            _record_api_response(
+                req.session_id,
+                final_answer,
+                buttons=buttons,
+                interactive_type=interactive_type,
+                list_config=list_config,
+            )
+            if entered_handoff:
+                _record_handoff_event(req.session_id, channel="api")
 
         return ChatResponse(
             session_id=req.session_id,
@@ -1069,12 +1324,23 @@ def chat(req: ChatRequest):
             if has_handoff:
                 state["human_handoff"] = True
 
-            return _respond(reply, buttons=buttons, interactive_type=interactive_type, list_config=list_config)
+            return _respond(
+                reply,
+                buttons=buttons,
+                interactive_type=interactive_type,
+                list_config=list_config,
+                entered_handoff=has_handoff and not was_handoff,
+            )
 
     except (ValueError, KeyError, RuntimeError) as e:
         logger.error(f"[flow error] {e}")
 
     return _respond("Ante esa problemática comunicate por WhatsApp. 😊")
+
+
+@app.post("/chat", response_model=ChatResponse)
+def chat(req: ChatRequest):
+    return _process_chat(req, record_turns=True)
 
 
 @app.post("/webhook")
@@ -1094,9 +1360,17 @@ async def webhook_receive(request: Request):
         if not messages:
             return {"ok": True}
 
+        # Comportamiento conocido: el runtime procesa solo el primer elemento.
+        # Soportar batches completos modificaría la semántica del webhook y queda
+        # fuera de esta fase.
         msg = messages[0]
         from_number = normalize_phone(msg.get("from", ""))
         msg_type = msg.get("type")
+        user_text = ""
+        selection = False
+        selected_option_id = None
+        unsupported_message = False
+        unsupported_notice = "Por ahora solo puedo leer mensajes de texto 😊💙"
 
         # Manejar respuesta de botón o lista
         if msg_type == "interactive":
@@ -1106,23 +1380,35 @@ async def webhook_receive(request: Request):
                 button_id = button_reply.get("id", "")
                 button_title = button_reply.get("title", "")
                 text = f"button_{button_id}"
+                user_text = button_title or button_id
+                selection = True
+                selected_option_id = button_id or None
                 logger.info(f"[webhook] button clicked: {button_id} ({button_title})")
             elif interactive.get("type") == "list_reply":
                 list_reply = interactive.get("list_reply", {})
                 list_id = list_reply.get("id", "")
                 list_title = list_reply.get("title", "")
                 text = f"button_{list_id}"
+                user_text = list_title or list_id
+                selection = True
+                selected_option_id = list_id or None
                 logger.info(f"[webhook] list item selected: {list_id} ({list_title})")
             else:
-                await send_whatsapp_text(from_number, "Por ahora solo puedo leer mensajes de texto y botones 😊💙")
-                return {"ok": True}
+                subtype = str(interactive.get("type") or "unknown")
+                user_text = f"[MENSAJE NO SOPORTADO: interactive/{subtype}]"
+                text = ""
+                unsupported_message = True
+                unsupported_notice = "Por ahora solo puedo leer mensajes de texto y botones 😊💙"
         elif msg_type == "text":
             text = (msg.get("text", {}).get("body") or "").strip()
+            user_text = text
         else:
-            await send_whatsapp_text(from_number, "Por ahora solo puedo leer mensajes de texto 😊💙")
-            return {"ok": True}
+            media_type = str(msg_type or "unknown")
+            user_text = f"[MENSAJE NO SOPORTADO: {media_type}]"
+            text = ""
+            unsupported_message = True
 
-        if not from_number or not text:
+        if not from_number:
             return {"ok": True}
 
     except (KeyError, IndexError, TypeError) as e:
@@ -1130,19 +1416,44 @@ async def webhook_receive(request: Request):
         return {"ok": True, "note": "payload not recognized"}
 
     session_id = f"wa:{from_number}"
+    state = get_session(session_id)
 
-    if get_session(session_id).get("human_handoff"):
+    _append_turn_safely({
+        "session_id": session_id,
+        "tipo": "respuesta_usuario",
+        "autor": "usuario",
+        "texto": user_text,
+        "seleccion_opcion": selection,
+        "opcion_id_seleccionada": selected_option_id,
+        "status": "handoff_waiting" if state.get("human_handoff") else None,
+        "channel": "whatsapp",
+    })
+
+    if unsupported_message:
+        await send_whatsapp_text(from_number, unsupported_notice)
+        return {"ok": True, "to": from_number, "in": user_text, "unsupported": True}
+
+    if not text:
+        return {"ok": True}
+
+    if state.get("human_handoff"):
         _append_chat_log(session_id, text, "[EN ESPERA DE AGENTE]")
         return {"ok": True, "to": from_number, "in": text, "handoff": True}
 
+    entered_handoff = False
     try:
         req_obj = ChatRequest(
             session_id=session_id,
             message=text,
             debug=False,
         )
-        resp: ChatResponse = await run_in_threadpool(chat, req_obj)
+        resp: ChatResponse = await run_in_threadpool(
+            _process_chat,
+            req_obj,
+            record_turns=False,
+        )
         answer = resp.answer
+        entered_handoff = bool(state.get("human_handoff"))
 
         interactive_type = resp.interactive_type or "button"
         buttons = resp.buttons
@@ -1170,13 +1481,16 @@ async def webhook_receive(request: Request):
         else:
             await send_whatsapp_text(from_number, answer)
 
-    except (HTTPException, RuntimeError, Exception) as e:
+    except Exception as e:
         logger.error(f"[webhook chat error] {e}")
         answer = "Perdón, no pude procesar tu mensaje en este momento."
         try:
             await send_whatsapp_text(from_number, answer)
         except Exception:
             pass
+
+    if entered_handoff:
+        _record_handoff_event(session_id, channel="whatsapp")
 
     return {"ok": True, "to": from_number, "in": text, "answer": answer}
 
@@ -1209,6 +1523,26 @@ def get_chat_log():
     )
 
 
+@app.get("/chatlog/turns")
+def get_chat_turns(
+    session_id: Optional[str] = Query(None),
+    from_: Optional[str] = Query(None, alias="from"),
+    to: Optional[str] = Query(None),
+):
+    start, end = _validate_chatlog_date_range(from_, to, required=False)
+    normalized_session_id = (session_id or "").strip() or None
+    try:
+        turns = chat_turn_store.read_turns(
+            session_id=normalized_session_id,
+            start=start,
+            end=end,
+        )
+    except Exception as e:
+        logger.error(f"[chat-turns] error de lectura: {e}", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"No se pudo leer chat_turns: {e}")
+    return {"ok": True, "turns": turns, "count": len(turns)}
+
+
 @app.get("/chatlog/download")
 def download_chat_log(
     from_: Optional[str] = Query(None, alias="from"),
@@ -1216,14 +1550,8 @@ def download_chat_log(
     format: str = Query("csv"),
     session_id: Optional[str] = Query(None),
 ):
-    if not from_ or not to:
-        raise HTTPException(status_code=422, detail="Los parámetros 'from' y 'to' son obligatorios")
-
-    start = _parse_date_param(from_, "from")
-    end = _parse_date_param(to, "to")
-
-    if start > end:
-        raise HTTPException(status_code=400, detail="'from' no puede ser posterior a 'to'")
+    start, end = _validate_chatlog_date_range(from_, to, required=True)
+    assert start is not None and end is not None
 
     fmt = format.lower()
     if fmt not in {"csv", "json", "pdf", "txt"}:
@@ -1303,6 +1631,7 @@ def _option_group_payload(option_group: str) -> Dict[str, Any]:
     option_count = len(options)
     return {
         "ok": True,
+        "source": message_store.compose_catalog_source("bindings"),
         "option_group": option_group,
         "option_count": option_count,
         "interactive_type": (
@@ -1312,10 +1641,101 @@ def _option_group_payload(option_group: str) -> Dict[str, Any]:
     }
 
 
+@app.get("/editor/blocks")
+def get_editor_blocks():
+    try:
+        return editor_blocks.build_editor_blocks()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _editor_error_detail(exc: Exception, *, code: Optional[str] = None) -> Dict[str, Any]:
+    return {
+        "message": str(exc),
+        "field": getattr(exc, "field", None),
+        "code": code or getattr(exc, "code", "editor_error"),
+    }
+
+
+def _editor_storage_http_exception(exc: Exception) -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail=_editor_error_detail(exc, code="storage_unavailable"),
+    )
+
+
+@app.post("/editor/blocks/{block_id}/opciones", status_code=201)
+def create_editor_block_option(block_id: str, req: EditorOptionCreateRequest):
+    block_id = _normalized_option_path(block_id, "block_id")
+    try:
+        block = editor_blocks.create_composed_option(block_id, req.model_dump())
+    except editor_blocks.EditorBlockNotFound as exc:
+        raise HTTPException(status_code=404, detail=_editor_error_detail(exc)) from exc
+    except editor_blocks.EditorBlockConflict as exc:
+        raise HTTPException(status_code=409, detail=_editor_error_detail(exc)) from exc
+    except editor_blocks.EditorBlockError as exc:
+        raise HTTPException(status_code=422, detail=_editor_error_detail(exc)) from exc
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 409 if any(
+            marker in detail for marker in ("ya existe", "superar 10 opciones", "supero 10 opciones")
+        ) else 422
+        raise HTTPException(
+            status_code=status_code,
+            detail=_editor_error_detail(exc, code="conflict" if status_code == 409 else "validation_error"),
+        ) from exc
+    except message_store.EditorStorageUnavailable as exc:
+        raise _editor_storage_http_exception(exc) from exc
+
+    logger.info(f"[editor] opción creada en {block_id} por {req.updated_by}")
+    return {"ok": True, "block": block}
+
+
+@app.put("/editor/blocks/{block_id}/opciones/{option_id}/respuesta")
+def update_editor_option_response(
+    block_id: str,
+    option_id: str,
+    req: EditorOptionResponseRequest,
+):
+    block_id = _normalized_option_path(block_id, "block_id")
+    option_id = _normalized_option_path(option_id, "option_id")
+    try:
+        block = editor_blocks.set_option_response(
+            block_id,
+            option_id,
+            req.model_dump(),
+        )
+    except editor_blocks.EditorBlockNotFound as exc:
+        raise HTTPException(status_code=404, detail=_editor_error_detail(exc)) from exc
+    except editor_blocks.EditorBlockConflict as exc:
+        raise HTTPException(status_code=409, detail=_editor_error_detail(exc)) from exc
+    except editor_blocks.EditorBlockError as exc:
+        raise HTTPException(status_code=422, detail=_editor_error_detail(exc)) from exc
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=_editor_error_detail(exc, code="validation_error"),
+        ) from exc
+    except message_store.EditorStorageUnavailable as exc:
+        raise _editor_storage_http_exception(exc) from exc
+
+    logger.info(
+        "[editor] respuesta de opción actualizada en %s/%s por %s",
+        block_id,
+        option_id,
+        req.updated_by,
+    )
+    return {"ok": True, "block": block}
+
+
 # Las rutas estáticas /options/groups deben declararse antes de /options/{option_group}.
 @app.get("/options/groups")
 def list_option_groups():
-    return {"ok": True, "groups": message_store.get_option_groups()}
+    return {
+        "ok": True,
+        "source": message_store.compose_catalog_source("bindings", "config"),
+        "groups": message_store.get_option_groups(),
+    }
 
 
 @app.get("/options/groups/{option_group}/config")
@@ -1323,6 +1743,7 @@ def get_option_group_config(option_group: str):
     option_group = _normalized_option_path(option_group, "option_group")
     return {
         "ok": True,
+        "source": message_store.compose_catalog_source("config"),
         "config": message_store.get_option_group_config(option_group),
     }
 
@@ -1335,15 +1756,15 @@ def update_option_group_config(option_group: str, req: OptionGroupConfigRequest)
             option_group,
             req.button_text_key,
             req.section_title_key,
+            req.prompt_key,
+            req.prev_message_keys,
+            req.shared_prev_keys,
             updated_by=req.updated_by,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"BigQuery no disponible para guardar la configuración: {exc}",
-        ) from exc
+    except message_store.EditorStorageUnavailable as exc:
+        raise _editor_storage_http_exception(exc) from exc
 
     logger.info(f"[options] configuración de {option_group} actualizada por {req.updated_by}")
     return {
@@ -1373,6 +1794,7 @@ def create_group_option(option_group: str, req: OptionCreateRequest):
             description_key=req.description_key,
             target_state=req.target_state,
             target_vars=req.target_vars,
+            target_option_group=req.target_option_group,
             stay_in_state=req.stay_in_state,
             target_substep_key=req.target_substep_key,
             target_substep_value=req.target_substep_value,
@@ -1387,11 +1809,8 @@ def create_group_option(option_group: str, req: OptionCreateRequest):
             for marker in ("ya existe", "superar 10 opciones", "supero 10 opciones")
         )
         raise HTTPException(status_code=409 if conflict else 422, detail=detail) from exc
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"BigQuery no disponible para crear la opción: {exc}",
-        ) from exc
+    except message_store.EditorStorageUnavailable as exc:
+        raise _editor_storage_http_exception(exc) from exc
 
     logger.info(f"[options] {option_group}/{option_id} creada por {req.updated_by}")
     return _option_group_payload(option_group)
@@ -1418,11 +1837,8 @@ def update_group_option(option_group: str, option_id: str, req: OptionUpdateRequ
         raise HTTPException(status_code=404, detail="opción no registrada") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"BigQuery no disponible para actualizar la opción: {exc}",
-        ) from exc
+    except message_store.EditorStorageUnavailable as exc:
+        raise _editor_storage_http_exception(exc) from exc
 
     logger.info(f"[options] {option_group}/{option_id} actualizada por {req.updated_by}")
     return _option_group_payload(option_group)
@@ -1446,11 +1862,8 @@ def delete_group_option(
         raise HTTPException(status_code=404, detail="opción no registrada") from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"BigQuery no disponible para eliminar la opción: {exc}",
-        ) from exc
+    except message_store.EditorStorageUnavailable as exc:
+        raise _editor_storage_http_exception(exc) from exc
 
     logger.info(f"[options] {option_group}/{option_id} eliminada por {updated_by}")
     return _option_group_payload(option_group)
@@ -1458,7 +1871,11 @@ def delete_group_option(
 
 @app.get("/messages")
 def list_messages():
-    return {"ok": True, "messages": message_store.get_all_messages_with_metadata()}
+    return {
+        "ok": True,
+        "source": message_store.compose_catalog_source("messages"),
+        "messages": message_store.get_all_messages_with_metadata(),
+    }
 
 
 @app.put("/messages/{message_key}")
@@ -1480,8 +1897,8 @@ def update_message(message_key: str, req: MessageUpdateRequest):
 
     try:
         message_store.set_message(message_key, content, req.updated_by)
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=f"BigQuery no disponible para guardar cambios: {e}")
+    except message_store.EditorStorageUnavailable as exc:
+        raise _editor_storage_http_exception(exc) from exc
 
     logger.info(f"[messages] {message_key} actualizado por {req.updated_by}")
     return {"ok": True, "message_key": message_key}
@@ -1493,11 +1910,8 @@ def delete_message(message_key: str, updated_by: str = Query(default="")):
         message_store.delete_message(message_key, updated_by=updated_by)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="message_key no registrada") from exc
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=f"BigQuery no disponible para eliminar el mensaje: {exc}",
-        ) from exc
+    except message_store.EditorStorageUnavailable as exc:
+        raise _editor_storage_http_exception(exc) from exc
 
     logger.info(f"[messages] {message_key} eliminado por {updated_by}")
     return {"ok": True, "message_key": message_key}
@@ -1511,8 +1925,8 @@ def reset_message(message_key: str, req: MessageResetBody):
 
     try:
         message_store.set_message(message_key, meta["default_content"], req.updated_by)
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=f"BigQuery no disponible para guardar cambios: {e}")
+    except message_store.EditorStorageUnavailable as exc:
+        raise _editor_storage_http_exception(exc) from exc
 
     logger.info(f"[messages] {message_key} restaurado a default por {req.updated_by}")
     return {"ok": True, "message_key": message_key}
@@ -1549,8 +1963,10 @@ def create_message(req: MessageCreateRequest):
             updated_by=req.updated_by,
             orden=req.orden,
         )
-    except (RuntimeError, ValueError) as e:
-        raise HTTPException(status_code=503, detail=f"No se pudo crear el mensaje: {e}")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except message_store.EditorStorageUnavailable as exc:
+        raise _editor_storage_http_exception(exc) from exc
 
     logger.info(f"[messages] {req.message_key} creado por {req.updated_by}")
     return {"ok": True, "message_key": req.message_key}
@@ -1563,8 +1979,8 @@ def reorder_messages(req: MessageReorderRequest):
 
     try:
         message_store.update_message_order(req.orders)
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=f"BigQuery no disponible para reordenar: {e}")
+    except message_store.EditorStorageUnavailable as exc:
+        raise _editor_storage_http_exception(exc) from exc
     except KeyError as e:
         raise HTTPException(status_code=404, detail=f"message_key no registrada: {e}")
 
@@ -1581,7 +1997,13 @@ class AgentSendRequest(BaseModel):
 @app.post("/agent/send")
 async def agent_send(req: AgentSendRequest):
     phone = req.session_id.replace("wa:", "")
-    await send_whatsapp_text(phone, req.message)
+    await send_whatsapp_text(
+        phone,
+        req.message,
+        turn_type="sistema",
+        author="sistema",
+        status="agente",
+    )
     _append_chat_log(req.session_id, f"[AGENTE] {req.message}", "")
     return {"ok": True}
 
@@ -1608,11 +2030,18 @@ async def bot_send(req: AgentSendRequest):
     if req.handoff:
         state = get_session(req.session_id)
         state["human_handoff"] = True
+        _record_handoff_event(req.session_id, channel="whatsapp")
         _append_chat_log(req.session_id, "[EN ESPERA DE AGENTE]", "")
         return {"ok": True}
 
     if req.message:
-        await send_whatsapp_text(phone, req.message)
+        await send_whatsapp_text(
+            phone,
+            req.message,
+            turn_type="sistema",
+            author="sistema",
+            status="bot_manual",
+        )
         _append_chat_log(req.session_id, "[BOT-MANUAL]", req.message)
         return {"ok": True}
 
@@ -1622,13 +2051,10 @@ async def bot_send(req: AgentSendRequest):
 @app.get("/flow/states")
 def get_flow_states():
     states = StateFactory.get_registered_states()
-    result = []
-    for state_name in states:
-        state_class = StateFactory._states.get(state_name)
-        result.append({
-            "state_name": state_name,
-            "state_class": state_class.__name__ if state_class else None,
-        })
+    result = [
+        {"state_id": state_name, "label": FLOW_STATE_LABELS[state_name]}
+        for state_name in states
+    ]
     return {"ok": True, "states": result, "count": len(result)}
 
 
@@ -1640,10 +2066,20 @@ def get_flow_states():
 async def startup():
     global COMPANY_DOMAIN_TO_CODE, COMPANY_DOMAINS, FLOW_CONTROLLER
 
+    # Esta validación queda fuera de los bloques best-effort: una configuración
+    # ambigua sí debe impedir el arranque antes de tocar cualquier dataset.
+    _validate_bigquery_dataset_configuration()
+
     COMPANY_DOMAIN_TO_CODE, COMPANY_DOMAINS = load_company_domains()
 
     FLOW_CONTROLLER = FlowController(FLOW_SPEC, COMPANY_DOMAIN_TO_CODE)
     logger.info(f"[startup] FlowController inicializado con {len(StateFactory.get_registered_states())} estados")
+
+    try:
+        chat_turn_store.initialize()
+    except Exception as e:
+        # Defensa adicional aunque initialize() ya sea best-effort.
+        logger.error(f"[startup] chat_turns no disponible: {e}", exc_info=True)
 
     message_store.load_all_messages()
 

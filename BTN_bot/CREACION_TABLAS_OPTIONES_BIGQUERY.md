@@ -51,7 +51,7 @@ Las credenciales no se suben al repositorio. En desarrollo pueden obtenerse medi
 | Variable | Obligatoria | Valor por defecto | Uso |
 |---|---:|---|---|
 | `GOOGLE_CLOUD_PROJECT` | Sí, para activar BigQuery | Sin valor | Proyecto donde se crean dataset y tablas. |
-| `BIGQUERY_CHAT_LOG_DATASET` | No | `inspectia_logs` | Dataset que contiene mensajes y opciones. |
+| `BIGQUERY_CHAT_LOG_DATASET` | Sí cuando existe `GOOGLE_CLOUD_PROJECT` | Sin default | Dataset que contiene mensajes y opciones. El backend falla al arrancar si hay proyecto GCP y falta este valor. |
 | `BIGQUERY_BOT_MESSAGES_TABLE` | No | `mensajes_editables` | Tabla del catálogo de mensajes. |
 | `BIGQUERY_OPTION_BINDINGS_TABLE` | No | `option_bindings` | Tabla versionada de opciones. |
 | `BIGQUERY_OPTION_GROUP_CONFIG_TABLE` | No | `option_group_config` | Tabla versionada de presentación por grupo. |
@@ -197,4 +197,3 @@ Esta verificación debe hacerse recién cuando se autorice probar contra el proy
 ## Estado actual de la validación
 
 La creación, el seed, la lectura versionada y las escrituras append-only están cubiertos por pruebas locales con clientes de BigQuery simulados. Todavía queda pendiente la prueba de integración contra tablas reales, tal como se acordó para esta etapa.
-

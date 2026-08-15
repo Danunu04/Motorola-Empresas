@@ -409,6 +409,15 @@ class FlowState(ABC):
         """Retorna el grupo dinámico del estado; None conserva el render legado."""
         return None
 
+    def get_option_group_prompt(self, option_group: str) -> str:
+        """Resolves the canonical message declared by an option group."""
+        config = message_store.get_option_group_config(option_group)
+        prompt_key = config["prompt_key"]
+        return message_store.get_message(
+            prompt_key,
+            default=config.get("prompt") or "",
+        )
+
     def handle_dynamic_option_override(
         self,
         context: "FlowContext",
@@ -449,6 +458,10 @@ class FlowState(ABC):
         context.update_vars(
             _parse_option_json(option.get("target_vars"), "target_vars", option_group, option_id)
         )
+        # `target_option_group` selects which group the destination may render. It does not
+        # decide when: each state keeps its own substep/timing gates.
+        target_option_group = option.get("target_option_group")
+        context.set_var("target_option_group", target_option_group)
         extra = _parse_option_json(
             option.get("extra_flags"), "extra_flags", option_group, option_id
         )
@@ -469,20 +482,29 @@ class FlowState(ABC):
                 return overridden
 
             reply_key = option.get("reply_key")
-            if not reply_key:
+            if reply_key:
+                reply = message_store.get_message(reply_key)
+            elif target_option_group:
+                reply = self.get_option_group_prompt(target_option_group)
+            else:
                 raise OptionRoutingError(
-                    f"{option_group}/{option_id}: reply_key es obligatorio para stay_in_state"
+                    f"{option_group}/{option_id}: falta reply_key o target_option_group"
                 )
             return self.response(
                 context,
-                message_store.get_message(reply_key),
+                reply,
                 sentiment=sentiment,
                 **extra,
             )
 
         target_state = option.get("target_state") or "EstadoSoporte"
         reply_key = option.get("reply_key")
-        reply = message_store.get_message(reply_key) if reply_key else None
+        if reply_key:
+            reply = message_store.get_message(reply_key)
+        elif target_option_group:
+            reply = self.get_option_group_prompt(target_option_group)
+        else:
+            reply = None
         if target_state not in StateFactory.get_registered_states():
             logger.error(
                 "[options] target_state inválido en %s/%s: %s; se deriva a soporte",
@@ -679,6 +701,23 @@ WELCOME_MESSAGE = (
 # Estados concretos - BTN Bot
 # ==============================
 
+FLOW_STATE_LABELS = {
+    "EstadoInicial": "Menú principal",
+    "EstadoPreFlujo": "Mensaje de espera",
+    "EstadoNoVeoDescuentos": "Ayuda con descuentos",
+    "EstadoInfoPedido": "Información del pedido",
+    "EstadoPedirMail": "Pedido de email",
+    "EstadoRegistroMailEmpresa": "Validación de email empresarial",
+    "EstadoLogin": "Consulta sobre ingreso anterior",
+    "EstadoPasosInicioSesion": "Pasos para iniciar sesión",
+    "EstadoConsultaAdicional": "Consulta adicional",
+    "EstadoFinalizado": "Fin de la conversación",
+    "EstadoFormulario": "Ayuda con el formulario",
+    "EstadoPortalBeneficios": "Acceso al portal de beneficios",
+    "EstadoBorrarNavegacion": "Borrado de datos de navegación",
+    "EstadoSoporte": "Derivación a una persona",
+}
+
 @StateFactory.register("EstadoInicial")
 class EstadoInicial(FlowState):
     """Menú principal con formato automático según sus opciones activas."""
@@ -728,90 +767,50 @@ PRE_FLUJO_MESSAGE = (
 
 @StateFactory.register("EstadoPreFlujo")
 class EstadoPreFlujo(FlowState):
-    """Pantalla intermedia que muestra el mensaje de empatía antes de derivar al flujo."""
+    """Pantalla intermedia modelada por origen con opciones y destino declarativos."""
+
+    def get_option_group(self, context: FlowContext) -> Optional[str]:
+        option_group = context.get_var("target_option_group")
+        return option_group if option_group in message_store.PREFLOW_GROUPS else None
 
     def prompt(self, context: FlowContext) -> str:
-        return message_store.get_message("pre_flujo_message", default=PRE_FLUJO_MESSAGE)
-
-    def get_buttons(self, context: FlowContext) -> List[Button]:
-        # Excepción acordada: "continuar" es un mini-router que depende de opcion_inicial y
-        # puede elegir cuatro destinos. Podría migrarse en el futuro si cada continuación se
-        # modela como una opción independiente con un target único.
-        return [
-            Button(
-                "continuar",
-                message_store.get_message("preflujo_continuar_button", default="CONTINUAR"),
-            ),
-        ]
+        option_group = self.get_option_group(context)
+        return self.get_option_group_prompt(option_group) if option_group else PRE_FLUJO_MESSAGE
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
         sentiment = detect_sentiment_basic(user_text)
-        opcion = context.get_var("opcion_inicial", "")
+        option_group = self.get_option_group(context)
+        if option_group is None:
+            return _set_state_and_reply(context, "EstadoInicial", sentiment=sentiment)
 
-        if user_text.startswith("button_"):
-            button_id = user_text.replace("button_", "")
-            if button_id == "continuar":
-                if opcion == "registro":
-                    context.set_var("flujo", "registro")
-                    return _set_state_and_reply(
-                        context,
-                        "EstadoPedirMail",message_store.get_message("registro_intro_text", default="Sigamos estos pasos así te puedo ayudar a ingresar en la Plataforma de Beneficios.\n\n¿Con qué mail estás intentando ingresar? 📧"),
-                        sentiment=sentiment,
-                    )
-                elif opcion == "no_veo_precios":
-                    context.set_var("flujo", "precios")
-                    return _set_state_and_reply(
-                        context,
-                        "EstadoPedirMail",message_store.get_message("precios_intro_text", default="Si ya ingresaste y no ves precios, sigamos estos pasos así podás acceder a los precios con descuento por ser parte de la Plataforma.\n\n¿Con qué mail estás intentando ingresar? 📧"),
-                        sentiment=sentiment,
-                    )
-                elif opcion == "no_veo_descuentos":
-                    context.set_var("flujo", "descuentos")
-                    context.set_var("form_substep", "pregunta_cargaste")
-                    return _set_state_and_reply(
-                        context,
-                        "EstadoNoVeoDescuentos",message_store.get_message("descuentos_intro_text", default="Si ingresaste con tu mail personal y no ves los descuentos aplicados, sigamos estos pasos así te ayudo a solucionarlo.\n\nPara comenzar, ¿cargaste el formulario que encontrás en la publicación del beneficio?"),
-                        sentiment=sentiment,
-                    )
-                elif opcion == "info_pedido":
-                    return _set_state_and_reply(
-                        context,
-                        "EstadoInfoPedido",message_store.get_message("info_pedido_text", default="Si necesitás información sobre tu pedido, escribinos por WhatsApp y te ayudamos 😊💙\n\nhttps://wa.me/5491153835784"),
-                        sentiment=sentiment,
-                    )
+        routed = self.route_dynamic_option(context, user_text, sentiment)
+        if routed is not None:
+            return routed
 
-        # Fallback: si escribe texto libre, derivar según la opción guardada
-        if opcion == "registro":
-            context.set_var("flujo", "registro")
+        options = message_store.get_option_set(option_group)
+        if not options:
             return _set_state_and_reply(
                 context,
-                "EstadoPedirMail",message_store.get_message("registro_intro_text", default="Sigamos estos pasos así te puedo ayudar a ingresar en la Plataforma de Beneficios.\n\n¿Con qué mail estás intentando ingresar? 📧"),
+                "EstadoSoporte",
+                reply=message_store.get_message(
+                    "handoff_text",
+                    default="Perdón, no estoy pudiendo continuar. Te voy a derivar con soporte.",
+                ),
                 sentiment=sentiment,
-            )
-        elif opcion == "no_veo_precios":
-            context.set_var("flujo", "precios")
-            return _set_state_and_reply(
-                context,
-                "EstadoPedirMail",message_store.get_message("precios_intro_text", default="Si ya ingresaste y no ves precios, sigamos estos pasos así podás acceder a los precios con descuento por ser parte de la Plataforma.\n\n¿Con qué mail estás intentando ingresar? 📧"),
-                sentiment=sentiment,
-            )
-        elif opcion == "no_veo_descuentos":
-            context.set_var("flujo", "descuentos")
-            context.set_var("form_substep", "pregunta_cargaste")
-            return _set_state_and_reply(
-                context,
-                "EstadoNoVeoDescuentos",message_store.get_message("descuentos_intro_text", default="Si ingresaste con tu mail personal y no ves los descuentos aplicados, sigamos estos pasos así te ayudo a solucionarlo.\n\nPara comenzar, ¿cargaste el formulario que encontrás en la publicación del beneficio?"),
-                sentiment=sentiment,
-            )
-        elif opcion == "info_pedido":
-            return _set_state_and_reply(
-                context,
-                "EstadoInfoPedido",message_store.get_message("info_pedido_text", default="Si necesitás información sobre tu pedido, escribinos por WhatsApp y te ayudamos 😊💙\n\nhttps://wa.me/5491153835784"),
-                sentiment=sentiment,
+                handoff=True,
             )
 
-        # Si no hay opción guardada, volver al inicio
-        return _set_state_and_reply(context, "EstadoInicial", sentiment=sentiment)
+        # Regla explícita para texto libre: el caso actual de una sola opción conserva el
+        # avance automático. Si el editor agrega más, no se adivina una elección: se repite
+        # el prompt con todas las opciones hasta que la persona seleccione una.
+        if len(options) == 1:
+            return self.route_dynamic_option(
+                context,
+                f'button_{options[0]["option_id"]}',
+                sentiment,
+            )
+
+        return self.response(context, self.prompt(context), sentiment=sentiment)
 
 
 @StateFactory.register("EstadoNoVeoDescuentos")
@@ -830,8 +829,20 @@ class EstadoNoVeoDescuentos(FlowState):
         if substep == "esperando_resultado":
             # Dead code conocido: se conserva intacto para revisarlo en una iteración futura.
             return [
-                Button("funciono", message_store.get_message("generic_funciono_button", default="✅ Funcionó")),
-                Button("no_funciono", message_store.get_message("generic_no_funciono_button", default="❌ No funcionó")),
+                Button(
+                    "funciono",
+                    message_store.get_message(
+                        "pasos_resultado_desde_descuentos_funciono_title",
+                        default="✅ Funcionó",
+                    ),
+                ),
+                Button(
+                    "no_funciono",
+                    message_store.get_message(
+                        "pasos_resultado_desde_descuentos_no_funciono_title",
+                        default="❌ No funcionó",
+                    ),
+                ),
             ]
         return []
 
@@ -1082,8 +1093,19 @@ class EstadoLogin(FlowState):
 class EstadoPasosInicioSesion(FlowState):
     def get_option_group(self, context: FlowContext) -> Optional[str]:
         if int(context.get_var("login_step", 0)) >= 3:
-            return "pasos_inicio_sesion_resultado"
+            target_group = context.get_var("target_option_group")
+            if target_group in {
+                "pasos_resultado_desde_descuentos",
+                "pasos_resultado_desde_login",
+                "pasos_resultado_desde_formulario",
+            }:
+                return target_group
+            return "pasos_resultado_desde_login"
         return None
+
+    def prompt(self, context: FlowContext) -> str:
+        option_group = self.get_option_group(context) or "pasos_resultado_desde_login"
+        return self.get_option_group_prompt(option_group)
 
     def handle(self, context: FlowContext, user_text: str, llm=None) -> Dict[str, Any]:
         sentiment = detect_sentiment_basic(user_text)
@@ -1108,7 +1130,8 @@ class EstadoPasosInicioSesion(FlowState):
         if step == 2:
             context.set_var("login_step", 3)
             return self.response(
-                context,message_store.get_message("pasos_step3_text", default="Vas a recibir un código en tu mail corporativo. Volvé a la página e ingresalo. 📧"),
+                context,
+                self.prompt(context),
                 sentiment=sentiment,
             )
 
@@ -1306,13 +1329,36 @@ class EstadoPortalBeneficios(FlowState):
 class EstadoBorrarNavegacion(FlowState):
     def get_option_group(self, context: FlowContext) -> Optional[str]:
         step = context.get_var("clear_nav_step", "confirmar")
+        target_group = context.get_var("target_option_group")
+
+        if step == "confirmar":
+            if target_group in message_store.DELETE_CONFIRM_GROUPS:
+                return target_group
+            return (
+                "borrar_nav_confirmar_desde_registro"
+                if context.get_var("flujo") == "registro"
+                else "borrar_nav_confirmar_desde_portal"
+            )
+        if step == "esperando_confirmacion":
+            if target_group in message_store.DELETE_WAIT_GROUPS:
+                return target_group
+            return "borrar_nav_esperando_confirmacion_directa"
+        if step == "finalizado":
+            if target_group in message_store.DELETE_RESULT_GROUPS:
+                return target_group
+            return (
+                "borrar_nav_finalizado_desde_registro"
+                if context.get_var("flujo") == "registro"
+                else "borrar_nav_finalizado_desde_portal"
+            )
         return {
-            "confirmar": "borrar_nav_confirmar",
             "explicar_motivo": "borrar_nav_explicar_motivo",
             "sabe_como": "borrar_nav_sabe_como",
-            "esperando_confirmacion": "borrar_nav_esperando_confirmacion",
-            "finalizado": "borrar_nav_finalizado",
         }.get(step)
+
+    def prompt(self, context: FlowContext) -> str:
+        option_group = self.get_option_group(context)
+        return self.get_option_group_prompt(option_group) if option_group else ""
 
     def handle_dynamic_option_override(
         self,
@@ -1322,7 +1368,7 @@ class EstadoBorrarNavegacion(FlowState):
         sentiment: str,
         extra: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
-        if option_group != "borrar_nav_esperando_confirmacion" or option["option_id"] != "listo":
+        if option_group not in message_store.DELETE_WAIT_GROUPS or option["option_id"] != "listo":
             return None
 
         # Excepción acordada: esta respuesta interpola el código de empresa y cambia según
@@ -1330,12 +1376,14 @@ class EstadoBorrarNavegacion(FlowState):
         flujo = context.get_var("flujo")
         code = context.get_session_data().code or "{CODIGO}"
         if flujo == "registro":
+            context.set_var("target_option_group", "borrar_nav_finalizado_desde_registro")
             return self.response(
                 context,
                 f"{message_store.get_message('borrar_nav_registro_code_text', default='Ingresá de nuevo, hacé click en registro, ingresá tu mail y usá este código:')} {code}.",
                 sentiment=sentiment,
                 **extra,
             )
+        context.set_var("target_option_group", "borrar_nav_finalizado_desde_portal")
         return self.response(
             context,
             message_store.get_message(
@@ -1360,9 +1408,11 @@ class EstadoBorrarNavegacion(FlowState):
             answer = parse_yes_no(user_text)
             if answer is True:
                 context.set_var("clear_nav_step", "sabe_como")
+                context.set_var("target_option_group", "borrar_nav_sabe_como")
                 return self.response(context, message_store.get_message("borrar_nav_ask_know_how_text", default="Sabés cómo hacerlo?"), sentiment=sentiment)
             if answer is False:
                 context.set_var("clear_nav_step", "explicar_motivo")
+                context.set_var("target_option_group", "borrar_nav_explicar_motivo")
                 return self.response(
                     context,message_store.get_message("borrar_nav_explain_why_text", default="Te cuento por qué te lo pido! A veces el navegador guarda credenciales viejas o incorrectas del portal de beneficios, y eso puede ser justo lo que está causando el problema. Borrando esos datos le damos un reinicio limpio y lo más probable es que todo funcione de una. Sabés cómo hacerlo?"),
                     sentiment=sentiment,
@@ -1373,9 +1423,11 @@ class EstadoBorrarNavegacion(FlowState):
             answer = parse_yes_no(user_text)
             if answer is True:
                 context.set_var("clear_nav_step", "esperando_confirmacion")
+                context.set_var("target_option_group", "borrar_nav_esperando_confirmacion_directa")
                 return self.response(context, message_store.get_message("borrar_nav_wait_finish_text", default="Perfecto, avisame cuando termines."), sentiment=sentiment)
             if answer is False:
                 context.set_var("clear_nav_step", "explicar_como")
+                context.set_var("target_option_group", "borrar_nav_esperando_confirmacion_tras_explicar_como")
                 return self.response(
                     context,message_store.get_message("borrar_nav_how_to_text", default="Abrí Chrome y tocá en los tres puntos (arriba a la derecha).\nSeleccioná \"Historial\" y luego \"Borrar datos de navegación\".\nElegí el intervalo de tiempo y marcá los datos a eliminar.\nTocá en \"Borrar datos\".\n\nAvisame cuando termines."),
                     sentiment=sentiment,
@@ -1386,9 +1438,11 @@ class EstadoBorrarNavegacion(FlowState):
             answer = parse_yes_no(user_text)
             if answer is True:
                 context.set_var("clear_nav_step", "esperando_confirmacion")
+                context.set_var("target_option_group", "borrar_nav_esperando_confirmacion_directa")
                 return self.response(context, message_store.get_message("borrar_nav_wait_finish_text", default="Perfecto, avisame cuando termines."), sentiment=sentiment)
             if answer is False:
                 context.set_var("clear_nav_step", "explicar_como")
+                context.set_var("target_option_group", "borrar_nav_esperando_confirmacion_tras_explicar_como")
                 return self.response(
                     context,message_store.get_message("borrar_nav_how_to_text", default="Abrí Chrome y tocá en los tres puntos (arriba a la derecha).\nSeleccioná \"Historial\" y luego \"Borrar datos de navegación\".\nElegí el intervalo de tiempo y marcá los datos a eliminar.\nTocá en \"Borrar datos\".\n\nAvisame cuando termines."),
                     sentiment=sentiment,
@@ -1397,6 +1451,7 @@ class EstadoBorrarNavegacion(FlowState):
 
         if step == "explicar_como":
             context.set_var("clear_nav_step", "esperando_confirmacion")
+            context.set_var("target_option_group", "borrar_nav_esperando_confirmacion_tras_explicar_como")
             return self.response(context, message_store.get_message("borrar_nav_ask_finished_text", default="Avisame cuando lo termines."), sentiment=sentiment)
 
         if step == "esperando_confirmacion":
@@ -1406,11 +1461,13 @@ class EstadoBorrarNavegacion(FlowState):
 
             context.set_var("clear_nav_step", "finalizado")
             if flujo == "registro":
+                context.set_var("target_option_group", "borrar_nav_finalizado_desde_registro")
                 return self.response(
                     context,
                     f"{message_store.get_message('borrar_nav_registro_code_text', default='Ingresá de nuevo, hacé click en registro, ingresá tu mail y usá este código:')} {code}.",
                     sentiment=sentiment,
                 )
+            context.set_var("target_option_group", "borrar_nav_finalizado_desde_portal")
             return self.response(context, message_store.get_message("borrar_nav_try_again_text", default="Perfecto. Probá de nuevo y contame si funcionó."), sentiment=sentiment)
 
         if step == "finalizado":
@@ -1547,6 +1604,7 @@ __all__ = [
     "render_option_group",
     "WELCOME_MESSAGE",
     "EMAIL_RE",
+    "FLOW_STATE_LABELS",
     "EstadoInicial",
     "EstadoPedirMail",
     "EstadoBorrarNavegacion",

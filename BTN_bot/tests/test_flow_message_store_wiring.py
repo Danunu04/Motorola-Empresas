@@ -58,7 +58,7 @@ class TestFallbackWithoutStoreValue:
         result = _send(controller, "fallback-welcome", "hola")
         assert result["reply"] == WELCOME_MESSAGE
 
-    def test_pre_flujo_message_falls_back_to_constant(self):
+    def test_private_preflow_prompt_falls_back_to_original_constant(self):
         controller = _build_controller()
         _send(controller, "fallback-preflujo", "hola")
         result = _send(controller, "fallback-preflujo", "button_registro")
@@ -91,9 +91,9 @@ class TestEditedValueIsUsed:
         result = _send(controller, "edited-welcome", "hola")
         assert result["reply"] == edited
 
-    def test_pre_flujo_message_uses_edited_value(self, monkeypatch):
+    def test_private_preflow_prompt_uses_edited_value(self, monkeypatch):
         edited = PRE_FLUJO_MESSAGE + EDITED_SUFFIX
-        _patch_message(monkeypatch, "pre_flujo_message", edited)
+        _patch_message(monkeypatch, "preflujo_desde_precios_prompt_text", edited)
 
         controller = _build_controller()
         _send(controller, "edited-preflujo", "hola")
@@ -137,8 +137,8 @@ class TestEditedValueIsUsed:
         assert result["reply"] == edited
 
 
-    def test_generic_yes_button_uses_edited_value(self, monkeypatch):
-        _patch_message(monkeypatch, "generic_yes_button", "Sí editado")
+    def test_private_info_yes_button_uses_edited_value(self, monkeypatch):
+        _patch_message(monkeypatch, "info_pedido_opciones_si_title", "Sí editado")
 
         controller = _build_controller()
         sid = "edited-yes-btn"
@@ -148,8 +148,10 @@ class TestEditedValueIsUsed:
         buttons = {btn["reply"]["id"]: btn["reply"]["title"] for btn in result["buttons"]}
         assert buttons["si"] == "Sí editado"
 
-    def test_generic_si_loaded_button_uses_edited_value(self, monkeypatch):
-        _patch_message(monkeypatch, "generic_si_loaded_button", "Sí cargué editado")
+    def test_private_discount_loaded_button_uses_edited_value(self, monkeypatch):
+        _patch_message(
+            monkeypatch, "descuentos_pregunta_cargaste_si_title", "Sí cargué editado"
+        )
 
         controller = _build_controller()
         sid = "edited-si-loaded-btn"

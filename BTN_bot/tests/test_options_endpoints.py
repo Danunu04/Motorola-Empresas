@@ -18,6 +18,7 @@ def _option(option_id, orden):
         "description_key": None,
         "target_state": "EstadoInicial",
         "target_vars": None,
+        "target_option_group": None,
         "stay_in_state": False,
         "target_substep_key": None,
         "target_substep_value": None,
@@ -37,6 +38,9 @@ def option_api(monkeypatch):
             "option_group": "demo",
             "button_text_key": "generic_options_button_text",
             "section_title_key": "generic_options_section_title",
+            "prompt_key": "welcome_message",
+            "prev_message_keys": [],
+            "shared_prev_keys": [],
             "button_text": "Ver opciones",
             "section_title": "Opciones",
         }
@@ -52,6 +56,9 @@ def option_api(monkeypatch):
             "option_group": group,
             "button_text_key": "generic_options_button_text",
             "section_title_key": "generic_options_section_title",
+            "prompt_key": "welcome_message",
+            "prev_message_keys": [],
+            "shared_prev_keys": [],
             "button_text": "Ver opciones",
             "section_title": "Opciones",
             "source": "default-fallback",
@@ -68,14 +75,23 @@ def option_api(monkeypatch):
                 "interactive_type": "list" if count > 3 else ("button" if count else None),
                 "button_text_key": config["button_text_key"],
                 "section_title_key": config["section_title_key"],
+                "prompt_key": config["prompt_key"],
+                "prev_message_keys": config["prev_message_keys"],
+                "shared_prev_keys": config["shared_prev_keys"],
             })
         return groups
 
-    def set_config(group, button_text_key, section_title_key, updated_by=""):
+    def set_config(
+        group, button_text_key, section_title_key, prompt_key,
+        prev_message_keys=None, shared_prev_keys=None, updated_by="",
+    ):
         configs[group] = {
             "option_group": group,
             "button_text_key": button_text_key,
             "section_title_key": section_title_key,
+            "prompt_key": prompt_key,
+            "prev_message_keys": prev_message_keys or [],
+            "shared_prev_keys": shared_prev_keys or [],
             "button_text": "Abrir",
             "section_title": "Alternativas",
             "updated_by": updated_by,
@@ -95,6 +111,7 @@ def option_api(monkeypatch):
             "description_key": kwargs.get("description_key"),
             "target_state": kwargs.get("target_state"),
             "target_vars": kwargs.get("target_vars"),
+            "target_option_group": kwargs.get("target_option_group"),
             "stay_in_state": kwargs.get("stay_in_state", False),
             "target_substep_key": kwargs.get("target_substep_key"),
             "target_substep_value": kwargs.get("target_substep_value"),
@@ -149,18 +166,31 @@ class TestOptionRouteRegistration:
             ("/options/{option_group}/{option_id}", frozenset({"DELETE"})),
         ]
 
+    def test_flow_states_exposes_all_14_business_labels(self):
+        response = TestClient(bot.app).get("/flow/states")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["count"] == 14
+        assert payload["states"] == [
+            {"state_id": state_id, "label": bot.FLOW_STATE_LABELS[state_id]}
+            for state_id in bot.StateFactory.get_registered_states()
+        ]
+
 
 class TestOptionReadsAndConfig:
     def test_groups_route_is_not_shadowed_by_dynamic_group_route(self, option_api):
         client, _, _ = option_api
         response = client.get("/options/groups")
         assert response.status_code == 200
+        assert response.json()["source"] == "default"
         assert response.json()["groups"][0]["option_group"] == "demo"
 
     def test_group_options_include_derived_format(self, option_api):
         client, _, _ = option_api
         response = client.get("/options/demo")
         assert response.status_code == 200
+        assert response.json()["source"] == "default"
         assert response.json()["option_count"] == 3
         assert response.json()["interactive_type"] == "button"
 
@@ -168,15 +198,20 @@ class TestOptionReadsAndConfig:
         client, _, _ = option_api
         response = client.get("/options/groups/demo/config")
         assert response.status_code == 200
+        assert response.json()["source"] == "default"
         assert response.json()["config"]["section_title"] == "Opciones"
 
         response = client.put("/options/groups/demo/config", json={
             "button_text_key": "custom_button",
             "section_title_key": "custom_section",
+            "prompt_key": "welcome_message",
+            "prev_message_keys": ["pasos_step1_text"],
+            "shared_prev_keys": ["pasos_step1_text"],
             "updated_by": "qa",
         })
         assert response.status_code == 200
         assert response.json()["config"]["button_text"] == "Abrir"
+        assert response.json()["config"]["prev_message_keys"] == ["pasos_step1_text"]
 
     def test_config_validation_and_persistence_errors_map_to_422_and_503(
         self, option_api, monkeypatch
@@ -188,17 +223,25 @@ class TestOptionReadsAndConfig:
             lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("key inexistente")),
         )
         assert client.put("/options/groups/demo/config", json={
-            "button_text_key": "x", "section_title_key": "y"
+            "button_text_key": "x", "section_title_key": "y", "prompt_key": "z"
         }).status_code == 422
 
         monkeypatch.setattr(
             bot.message_store,
             "set_option_group_config",
-            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("BQ offline")),
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                bot.message_store.EditorStorageUnavailable()
+            ),
         )
-        assert client.put("/options/groups/demo/config", json={
-            "button_text_key": "x", "section_title_key": "y"
-        }).status_code == 503
+        unavailable = client.put("/options/groups/demo/config", json={
+            "button_text_key": "x", "section_title_key": "y", "prompt_key": "z"
+        })
+        assert unavailable.status_code == 503
+        assert unavailable.json()["detail"] == {
+            "message": bot.message_store.EDITOR_STORAGE_UNAVAILABLE_MESSAGE,
+            "field": None,
+            "code": "storage_unavailable",
+        }
 
 
 class TestOptionMutations:
@@ -214,6 +257,19 @@ class TestOptionMutations:
         assert response.status_code == 201
         assert response.json()["option_count"] == 4
         assert response.json()["interactive_type"] == "list"
+
+    def test_post_accepts_deferred_target_option_group(self, option_api):
+        client, options, _ = option_api
+        response = client.post("/options/demo", json={
+            "option_id": "4",
+            "orden": 40,
+            "title_key": "generic_yes_button",
+            "target_state": "EstadoPasosInicioSesion",
+            "target_option_group": "pasos_resultado_desde_login",
+        })
+
+        assert response.status_code == 201
+        assert options["demo"][-1]["target_option_group"] == "pasos_resultado_desde_login"
 
     def test_delete_fourth_option_changes_list_back_to_buttons(self, option_api):
         client, _, _ = option_api
@@ -288,10 +344,15 @@ class TestOptionValidationErrors:
         monkeypatch.setattr(
             bot.message_store,
             "create_option_binding",
-            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("BQ offline")),
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                bot.message_store.EditorStorageUnavailable()
+            ),
         )
         response = client.post("/options/demo", json={
             "option_id": "4", "orden": 40, "title_key": "generic_yes_button",
             "target_state": "EstadoInicial",
         })
         assert response.status_code == 503
+        assert response.json()["detail"]["message"] == (
+            bot.message_store.EDITOR_STORAGE_UNAVAILABLE_MESSAGE
+        )

@@ -538,7 +538,7 @@ Al guardar, el backend normaliza combinaciones para evitar estados ambiguos:
 - Si `stay_in_state = true`, fuerza `target_state = null`.
 - Si `stay_in_state = false`, fuerza `target_substep_key = null` y `target_substep_value = null`.
 - Si el salto no tiene `target_state`, se interpreta como soporte.
-- Si `target_state = "EstadoSoporte"` o no existe, completa `reply_key` con `handoff_text` cuando falta y agrega `handoff: true` a `extra_flags`.
+- Si `target_state = "EstadoSoporte"` o no existe, agrega `handoff: true` a `extra_flags`. `reply_key` se conserva nulo cuando la opción no tiene respuesta propia; en ese caso el estado destino aporta su mensaje.
 - Los objetos JSON se almacenan como strings JSON compactos.
 - Espacios externos de `option_group` y `option_id` se eliminan.
 
@@ -624,7 +624,7 @@ Configuración recomendada:
 }
 ```
 
-El backend refuerza esta combinación. Aunque el editor omita el flag, normaliza el salto a soporte con `handoff: true`. `EstadoSoporte` no debe usarse confiando en un prompt propio.
+El backend refuerza el handoff. Aunque el editor omita el flag, normaliza el salto a soporte con `handoff: true`. El `reply_key` es opcional: si falta, el runtime usa el mensaje canónico de soporte como respuesta del estado destino.
 
 ### Destino vacío o inválido en runtime
 
@@ -659,9 +659,11 @@ Es otro objeto genérico, separado de las variables persistentes del flujo. Sus 
 
 No debe confundirse con `target_vars`: `target_vars` modifica el contexto del flujo; `extra_flags` modifica propiedades adicionales de la respuesta.
 
-## Mapeo inicial completo
+## Mapeo inicial histórico (superado por el editor unificado)
 
-El seed contiene 17 grupos y 34 opciones. Este mapeo reproduce el comportamiento existente y es el punto de partida editable.
+Este apartado conserva el snapshot original de 17 grupos y 34 opciones como referencia de la
+API fina. El seed vigente está documentado en `Plan.md`: contiene 26 grupos y 47 opciones y el
+frontend de producto consume `GET /editor/blocks`.
 
 ### Resumen de grupos
 
@@ -1286,13 +1288,14 @@ button_registro
 
 El router elimina el prefijo, busca la versión activa por grupo e ID y ejecuta su binding. La transición de lista a botones no cambia el ruteo.
 
-## Excepciones que siguen en código
+## Excepciones y deuda del mapeo histórico
 
-### `EstadoPreFlujo.continuar`
+### `EstadoPreFlujo.continuar` (retirada)
 
-El botón `continuar` permanece hardcodeado porque ejecuta un mini-router según `opcion_inicial` y puede decidir entre cuatro destinos. El texto del botón sigue saliendo del store, pero el ruteo no pertenece a `option_bindings`.
-
-Se dejó un comentario en código explicando que podría migrarse en el futuro mediante una opción genérica si se redefine ese mini-router.
+La excepción original fue eliminada al separar preflujo en cuatro grupos con prompts, títulos y
+bindings privados. `opcion_inicial`, el botón legacy y el mini-router ya no forman parte del
+runtime. Cada `CONTINUAR` tiene un destino fijo. Ante texto libre se ejecuta la única opción del
+grupo; si una edición deja dos o más, el estado repite el prompt y no elige por orden.
 
 ### Interpolación `{code}` al borrar navegación
 
@@ -1425,7 +1428,6 @@ La suite completa del repositorio aprobó 149 pruebas en la última ejecución l
 - Corregir el orden de `load_dotenv()` e importación de `message_store` para personalizaciones de tablas en `.env`.
 - Revisar la migración y eliminación automática de `bot_messages` antes del primer despliegue real.
 - Revisar a futuro el dead code, sin eliminarlo en esta entrega.
-- Evaluar la migración del mini-router `EstadoPreFlujo.continuar`.
 - Decidir si `EstadoFinalizado.volver` debe volverse operativo.
 
 ### Decisiones que no deben reabrirse al implementar el front
